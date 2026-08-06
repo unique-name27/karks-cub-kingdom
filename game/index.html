@@ -1,0 +1,2752 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Karks Cub Kingdom -- Playable Demo</title>
+<style>
+  html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;}
+  #c{background:#000;image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="960" height="540"></canvas></div>
+<script>
+'use strict';
+/* ======================================================================
+   KARKS CUB KINGDOM -- playable demo
+   Single-file implementation per SPEC-game.md. Shares the palette, pixel
+   helpers and audio engine style with intro/index.html (copied + adapted
+   here since this is a separate HTML document/AudioContext).
+   ====================================================================== */
+
+/* ---------------- constants & palette ---------------- */
+const CW = 960, CH = 540, TILE = 16;
+const PAL = {
+  cream:'#f3e9d2', terracotta:'#c96f4a', wood:'#8a5a30',
+  night:'#141428', gold:'#e8b84b', outline:'#6b2b1f', ink:'#2a1c12',
+  silhouette:'#0a0a14', wall:'#241a22', floor:'#3a2a1c',
+  glowHi:'#ffb347', glowLo:'#7a4a1e', heartFull:'#c9394a', heartEmpty:'#3a2a20',
+  napkin:'#efe6d0', napkinShade:'#cbbf9e', riesling:'#5a8a3c', rieslingDark:'#3a6024'
+};
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha:false });
+
+/* DPR-aware backing store: size the canvas's actual pixel buffer to match its
+   displayed size in device pixels exactly, so the browser never has to
+   resample the canvas itself (that resample, at the non-integer ratios most
+   window sizes produce, is what was blurring text). All existing drawing
+   code still works in the 960x540 logical space -- one ctx transform maps it
+   onto the native-resolution backing store. Setting canvas.width/height
+   resets both the transform and imageSmoothingEnabled, so both are
+   (re)applied here, every time, after sizing. */
+function fitCanvas(){
+  const cssScale = Math.max(1, Math.min(window.innerWidth / CW, window.innerHeight / CH));
+  const cssW = Math.floor(CW*cssScale), cssH = Math.floor(CH*cssScale);
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  const dpr = window.devicePixelRatio || 1;
+  const bw = Math.max(1, Math.round(cssW*dpr));
+  const scale = bw / CW;
+  const bh = Math.max(1, Math.round(CH*scale));
+  canvas.width = bw;
+  canvas.height = bh;
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
+
+/* ---------------- assets (reused from ../intro/assets/) ---------------- */
+const imgDungeon = new Image();
+imgDungeon.src = '../intro/assets/tiny_dungeon.png';
+let assetsReady = false;
+imgDungeon.onload = ()=>{ assetsReady = true; };
+imgDungeon.onerror = ()=>{ assetsReady = true; };
+
+function tileSrcX(col){ return col*TILE; }
+function tileSrcY(row){ return row*TILE; }
+
+const tintCache = new Map();
+/* NOTE: if img isn't loaded yet, drawImage silently draws nothing -- caching
+   that result would permanently freeze a transparent tile even after the
+   image finishes loading. Only cache once the source is actually decoded;
+   an early call just returns an (uncached, blank-for-now) canvas that gets
+   rebuilt correctly on the next call after load. Callers additionally gate
+   on `assetsReady` (see drawBaseScene) so this early-blank path is rare. */
+function tintedSprite(img, col, row, color){
+  const key = img.src+'|'+col+'|'+row+'|'+color;
+  let c = tintCache.get(key);
+  if(c) return c;
+  const off = document.createElement('canvas');
+  off.width = TILE; off.height = TILE;
+  const o = off.getContext('2d');
+  o.imageSmoothingEnabled = false;
+  o.drawImage(img, tileSrcX(col), tileSrcY(row), TILE, TILE, 0, 0, TILE, TILE);
+  o.globalCompositeOperation = 'source-in';
+  o.fillStyle = color;
+  o.fillRect(0,0,TILE,TILE);
+  if(img.complete && img.naturalWidth>0) tintCache.set(key, off);
+  return off;
+}
+function rawTile(img, col, row){
+  const key = img.src+'|raw|'+col+'|'+row;
+  let c = tintCache.get(key);
+  if(c) return c;
+  const off = document.createElement('canvas');
+  off.width = TILE; off.height = TILE;
+  const o = off.getContext('2d');
+  o.imageSmoothingEnabled = false;
+  o.drawImage(img, tileSrcX(col), tileSrcY(row), TILE, TILE, 0, 0, TILE, TILE);
+  if(img.complete && img.naturalWidth>0) tintCache.set(key, off);
+  return off;
+}
+function drawTile(ctx, tileCanvas, dx, dy, scale, flipY, flipX){
+  ctx.imageSmoothingEnabled = false;
+  if(flipY || flipX){
+    ctx.save();
+    ctx.translate(dx + (flipX?TILE*scale:0), dy + (flipY?TILE*scale:0));
+    ctx.scale(flipX?-1:1, flipY?-1:1);
+    ctx.drawImage(tileCanvas, 0, 0, TILE*scale, TILE*scale);
+    ctx.restore();
+  } else {
+    ctx.drawImage(tileCanvas, dx, dy, TILE*scale, TILE*scale);
+  }
+}
+
+/* ---------------- pixel text (half-res upscale trick) ---------------- */
+const textCache = new Map();
+function pixelText(text, px, color, weight){
+  weight = weight || 'bold';
+  const key = text+'|'+px+'|'+color+'|'+weight;
+  let hit = textCache.get(key);
+  if(hit) return hit;
+  const half = Math.max(5, Math.round(px/2));
+  let tmp = document.createElement('canvas');
+  let tctx = tmp.getContext('2d');
+  tctx.font = weight+' '+half+'px monospace';
+  const m = tctx.measureText(text);
+  const w = Math.max(1, Math.ceil(m.width)) + 4;
+  const h = half + 8;
+  tmp.width = w; tmp.height = h;
+  tctx = tmp.getContext('2d');
+  tctx.font = weight+' '+half+'px monospace';
+  tctx.fillStyle = color;
+  tctx.textBaseline = 'top';
+  tctx.imageSmoothingEnabled = false;
+  tctx.fillText(text, 2, 2);
+  const result = { canvas: tmp, w: w*2, h: h*2 };
+  textCache.set(key, result);
+  return result;
+}
+function drawPixelText(ctx, text, x, y, px, color, align, weight){
+  if(!text) return 0;
+  const pt = pixelText(text, px, color, weight);
+  let dx = x;
+  if(align === 'center') dx = x - pt.w/2;
+  else if(align === 'right') dx = x - pt.w;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(pt.canvas, Math.round(dx), Math.round(y), pt.w, pt.h);
+  return pt.w;
+}
+/* ---------------- "reading" text: crisp native fillText, no pixelation ----
+   Used for anything meant to be actually READ at a glance -- speech bubbles,
+   typewriter narration, tutorial card bodies, hints, critiques/insults,
+   end-card stats. The half-res-then-2x pixelation trick above doubles the
+   blur once the DPR-aware canvas gets its non-integer CSS display scale
+   applied, so this class of text skips that trick entirely and draws
+   straight at final size via the browser's own font rasterizer. Chunky
+   "display" text (logo, slams, card titles, DUCKED!, TRY AGAIN) keeps using
+   drawChunkyText/drawPixelText -- it's large enough to read fine and the
+   blocky look is intentional there. */
+function readingFont(px){ return 'bold '+px+'px monospace'; }
+function measureReadingText(ctx, text, px){
+  ctx.save();
+  ctx.font = readingFont(px);
+  const w = ctx.measureText(text).width;
+  ctx.restore();
+  return w;
+}
+function drawReadingText(ctx, text, x, y, px, color, align){
+  if(!text) return 0;
+  ctx.save();
+  ctx.font = readingFont(px);
+  ctx.textBaseline = 'top';
+  ctx.textAlign = align || 'left';
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  const w = ctx.measureText(text).width;
+  ctx.restore();
+  return w;
+}
+/* for reading text laid directly over busy scenery (not on a cream bubble):
+   a dark outline keeps it legible against any background. */
+function drawReadingTextOutlined(ctx, text, x, y, px, color, outlineColor, align){
+  if(!text) return 0;
+  ctx.save();
+  ctx.font = readingFont(px);
+  ctx.textBaseline = 'top';
+  ctx.textAlign = align || 'left';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = outlineColor;
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  const w = ctx.measureText(text).width;
+  ctx.restore();
+  return w;
+}
+function drawChunkyText(ctx, text, cx, cy, px, fill, outline, align){
+  align = align || 'center';
+  const offs = [[-2,0],[2,0],[0,-2],[0,2],[-2,-2],[2,-2],[-2,2],[2,2]];
+  for(const [ox,oy] of offs){
+    drawPixelText(ctx, text, cx+ox, cy+oy, px, outline, align);
+  }
+  return drawPixelText(ctx, text, cx, cy, px, fill, align);
+}
+
+/* ---------------- pixel primitives ---------------- */
+function drawPixelCircle(ctx, cx, cy, r, color, px){
+  px = px || 2;
+  ctx.fillStyle = color;
+  for(let dy=-r; dy<=r; dy+=px){
+    const w = Math.sqrt(Math.max(0, r*r - dy*dy));
+    const rowW = Math.max(px, Math.round((w*2)/px)*px);
+    ctx.fillRect(Math.round(cx-rowW/2), Math.round(cy+dy), rowW, px);
+  }
+}
+function drawBitmap(ctx, rows, colorMap, x, y, cell){
+  for(let r=0;r<rows.length;r++){
+    const row = rows[r];
+    for(let c=0;c<row.length;c++){
+      const ch = row[c];
+      if(ch === '0' || ch === '.') continue;
+      ctx.fillStyle = colorMap[ch];
+      ctx.fillRect(Math.round(x+c*cell), Math.round(y+r*cell), cell, cell);
+    }
+  }
+}
+function drawSparkle(ctx, x, y, size, alpha, color){
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.fillRect(Math.round(x-1), Math.round(y-size), 2, size*2);
+  ctx.fillRect(Math.round(x-size), Math.round(y-1), size*2, 2);
+  ctx.restore();
+}
+const SPARKLE_SIZES = [1,3,4,2];
+function sparkleFrameSize(t, period){
+  period = period || 0.4;
+  const local = ((t % period) + period) % period;
+  const frame = Math.min(3, Math.floor(local/(period/4)));
+  return SPARKLE_SIZES[frame];
+}
+
+/* ---------------- programmatic props ---------------- */
+const TOQUE_ROWS = ['00111100','01111110','01111110','11111111','11111111'];
+const TOQUE_COLORS = {'1':'#f5f2ea'};
+const TOQUE_BAND_SHADE = '#c9c2b3';
+function drawToque(ctx, x, y, cell){
+  drawBitmap(ctx, TOQUE_ROWS, TOQUE_COLORS, x, y, cell);
+  ctx.fillStyle = TOQUE_BAND_SHADE;
+  ctx.fillRect(Math.round(x), Math.round(y+4*cell), 8*cell, cell*0.35);
+}
+const STEAK_ROWS = ['01111110','12222110','12133210','12222110','01111110'];
+const STEAK_COLORS = {'1':'#e79b8c','2':'#f2c9b8','3':'#7a3f2a'};
+function drawSteak(ctx, x, y, cell){
+  drawBitmap(ctx, STEAK_ROWS, STEAK_COLORS, x, y, cell);
+}
+/* "laugh chip" meter icon -- gold rounded-square chip with a tiny pixel "HA"
+   mark, fill in {0, 0.5, 1}. Kept the function name `drawHeart` and the same
+   (ctx,x,y,cell,fill) signature on purpose: every caller (HUD meter, world
+   pickups) still passes the exact same half-heart-unit fill math as before --
+   this is a pure visual/text retheme, not a logic change. */
+const CHIP_ROWS = ['.1111111.','111111111','111111111','111111111','111111111','111111111','111111111','111111111','.1111111.'];
+const HA_GLYPH  = ['1.1..1.','1.1.1.1','111.111','1.1.1.1','1.1.1.1'];
+function drawHeart(ctx, x, y, cell, fill){
+  if(fill<=0){
+    drawBitmap(ctx, CHIP_ROWS, {'1':PAL.heartEmpty}, x, y, cell);
+    return;
+  }
+  const baseColor = fill>=1 ? PAL.gold : '#8a7038';
+  const glyphColor = fill>=1 ? PAL.outline : '#5c4a26';
+  drawBitmap(ctx, CHIP_ROWS, {'1':baseColor}, x, y, cell);
+  drawBitmap(ctx, HA_GLYPH, {'1':glyphColor}, x+cell, y+cell*2, cell);
+}
+/* small green riesling bottle */
+const BOTTLE_ROWS = ['.11.','.11.','1111','1111','1111','1111','1111','1111'];
+const BOTTLE_COLORS = {'1':PAL.riesling};
+function drawBottle(ctx, x, y, cell){
+  drawBitmap(ctx, BOTTLE_ROWS, BOTTLE_COLORS, x, y, cell);
+  ctx.fillStyle = PAL.rieslingDark;
+  ctx.fillRect(Math.round(x+cell), Math.round(y), 2*cell, cell);
+  ctx.fillStyle = '#dff0e8';
+  ctx.fillRect(Math.round(x+cell), Math.round(y+3*cell), cell, 3*cell); // label glint
+}
+function drawNapkin(ctx, x, y, r){
+  drawPixelCircle(ctx, x, y, r, PAL.napkin, 2);
+  drawPixelCircle(ctx, x-1, y+1, Math.max(1,r-2), PAL.napkinShade, 2);
+}
+function drawShadow(ctx, x, y, r, alpha){
+  ctx.save();
+  ctx.globalAlpha = (alpha===undefined?0.35:alpha);
+  drawPixelCircle(ctx, x, y, r, '#000000', 2);
+  ctx.restore();
+}
+
+/* ---------------- typewriter ---------------- */
+function makeTypewriter(lines, cps, gap){
+  cps = cps || 20;
+  gap = gap===undefined ? 0.4 : gap;
+  const starts = [];
+  let acc = 0;
+  for(let i=0;i<lines.length;i++){
+    starts.push(acc);
+    acc += lines[i].length/cps + gap;
+  }
+  return {
+    lines, starts, cps,
+    prevRevealed: lines.map(()=>0),
+    getState(t){
+      const out = [];
+      for(let i=0;i<lines.length;i++){
+        const rel = t - starts[i];
+        let n = 0;
+        if(rel > 0) n = Math.min(lines[i].length, Math.floor(rel*cps));
+        out.push(n);
+      }
+      return out;
+    },
+    allDone(t){ return t >= starts[starts.length-1] + lines[lines.length-1].length/cps; }
+  };
+}
+function drawSpeechBubble(ctx, x, y, w, h, growT){
+  const gw = Math.max(4,w*growT), gh = Math.max(4,h*growT);
+  const by = y + (h-gh);
+  ctx.fillStyle = PAL.wood; ctx.fillRect(x-4, by-4, gw+8, gh+8);
+  ctx.fillStyle = PAL.cream; ctx.fillRect(x, by, gw, gh);
+  ctx.fillStyle = PAL.cream; ctx.fillRect(x+20, by+gh, 14, 10);
+  ctx.fillStyle = PAL.wood; ctx.fillRect(x+18, by+gh+10, 18, 4);
+}
+/* one-line auto-sized bubble anchored above (cx,bottomY), used for the many
+   short "over-the-head" lines in the game (prompts, critiques, unison finale).
+   Clamped to stay fully on-canvas -- several callers anchor near the right
+   wall (boss.x ~900) or top wall, where a wide line at the larger readability-
+   pass sizes could otherwise push the box off-screen. The text is drawn
+   centered within the (possibly re-centered) box, not at the original cx, so
+   it never ends up off-center inside its own bubble. */
+function drawAutoBubble(ctx, text, cx, bottomY, px, growT){
+  growT = growT===undefined ? 1 : growT;
+  const lines = Array.isArray(text) ? text : [text]; // array = pre-wrapped multi-line
+  const pad = 10, margin = 6, lineH = Math.round(px*1.35);
+  let maxW = 0;
+  for(const l of lines) maxW = Math.max(maxW, measureReadingText(ctx, l, px));
+  const w = maxW + pad*2, h = lineH*lines.length + pad*2;
+  const x = Math.max(margin, Math.min(CW-w-margin, cx-w/2));
+  const y = Math.max(margin, Math.min(CH-h-margin, bottomY-h));
+  drawSpeechBubble(ctx, x, y, w, h, growT);
+  if(growT >= 0.99){
+    for(let i=0;i<lines.length;i++){
+      drawReadingText(ctx, lines[i], x+w/2, y+pad+i*lineH, px, '#000000', 'center');
+    }
+  }
+}
+
+/* ======================================================================
+   AUDIO ENGINE -- all synthesized, WebAudio only (copied + adapted from
+   intro/index.html: same voices/SFX/theme tables, generalized so tempo,
+   drums, harmony and hat-density can change live per beat of the game).
+   ====================================================================== */
+const BEAT_DEFAULT = 60/112;
+let actx = null, masterGain = null, compressor = null, musicGain = null, fxGain = null;
+let noiseBuffer = null;
+let drumsOn = false, harmonyOn = false, hatsSixteenths = false;
+
+function noteToFreq(note){
+  const m = /^([A-G])(#?)(\d)$/.exec(note);
+  if(!m) return 440;
+  const letter = m[1], sharp = m[2]==='#', oct = +m[3];
+  const base = {C:-9,D:-7,E:-5,F:-4,G:-2,A:0,B:2}[letter] + (sharp?1:0);
+  const n = base + (oct-4)*12;
+  return 440*Math.pow(2, n/12);
+}
+const CMAJ = ['C','D','E','F','G','A','B'];
+function diatonicThirdBelow(note){
+  const m = /^([A-G])(\d)$/.exec(note);
+  if(!m) return note;
+  const letter = m[1]; let oct = +m[2];
+  let idx = CMAJ.indexOf(letter) - 2;
+  while(idx < 0){ idx += 7; oct -= 1; }
+  return CMAJ[idx] + oct;
+}
+
+function initAudio(){
+  if(actx) return;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  actx = new Ctx();
+  noiseBuffer = actx.createBuffer(1, actx.sampleRate*2, actx.sampleRate);
+  const nd = noiseBuffer.getChannelData(0);
+  for(let i=0;i<nd.length;i++) nd[i] = (Math.random()*2-1);
+  compressor = actx.createDynamicsCompressor();
+  masterGain = actx.createGain(); masterGain.gain.value = 0.8;
+  compressor.connect(masterGain);
+  masterGain.connect(actx.destination);
+  musicGain = actx.createGain(); musicGain.gain.value = 1.0;
+  musicGain.connect(compressor);
+  fxGain = actx.createGain(); fxGain.gain.value = 1.0;
+  fxGain.connect(compressor);
+}
+
+/* ---------------- background music track (theme.mp3) ----------------
+   Routed into the SAME musicGain node the chiptune scheduler already uses,
+   via createMediaElementSource -- every existing ducking call (setMusicLevel/
+   duckDown/duckUp: the silence beat, the fanfare duck, the finale swell) then
+   keeps working unchanged on the real track with no special-casing. The
+   chiptune scheduler itself keeps running underneath (cheap bookkeeping) but
+   dispatchEvent() skips its actual note-playing calls while useMp3Music is
+   true -- see there. Every direct one-off SFX call (dings, twangs, slam
+   booms, whoosh, chimes, fanfare, record scratch, groan...) is unaffected
+   either way since those aren't routed through the scheduler at all. */
+const MUSIC_TRACK_SRC = '../assets/music/theme.mp3';
+let bgmEl = null, bgmSource = null;
+let useMp3Music = false, bgmFallback = false;
+function initMusicTrack(){
+  if(bgmEl || bgmFallback) return;
+  try{
+    bgmEl = document.createElement('audio');
+    bgmEl.loop = true;
+    bgmEl.preload = 'auto';
+    bgmEl.src = MUSIC_TRACK_SRC;
+    bgmEl.addEventListener('error', ()=>{ bgmFallback = true; useMp3Music = false; });
+    bgmSource = actx.createMediaElementSource(bgmEl);
+    bgmSource.connect(musicGain);
+  } catch(err){
+    // MediaElementSource unsupported, or the element/graph setup blew up --
+    // never let this take music down entirely, just stay on the chiptune path
+    bgmFallback = true; useMp3Music = false; bgmEl = null; bgmSource = null;
+  }
+}
+function startMusicTrack(){
+  if(bgmFallback || !bgmEl) return;
+  try{
+    const p = bgmEl.play();
+    if(p && typeof p.then==='function'){
+      p.then(()=>{ useMp3Music = true; }).catch(()=>{ bgmFallback = true; useMp3Music = false; });
+    } else {
+      useMp3Music = true; // browsers without a Promise-returning play() -- assume it started
+    }
+  } catch(err){
+    bgmFallback = true; useMp3Music = false;
+  }
+}
+
+/* ---- voices (identical synthesis to the intro) ---- */
+function playLead(note, t, dur, vibrato, gain){
+  gain = gain===undefined ? 0.16 : gain;
+  const freq = noteToFreq(note);
+  const osc = actx.createOscillator(); osc.type = 'square';
+  osc.frequency.setValueAtTime(freq, t);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(gain, t+0.008);
+  const relStart = t + Math.max(dur-0.01, 0.01);
+  g.gain.setValueAtTime(gain, relStart);
+  g.gain.linearRampToValueAtTime(0, relStart+0.01);
+  osc.connect(g); g.connect(musicGain);
+  if(vibrato){
+    const lfo = actx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 5;
+    const lfoGain = actx.createGain();
+    lfoGain.gain.value = freq*(Math.pow(2,4/1200)-1);
+    lfo.connect(lfoGain); lfoGain.connect(osc.frequency);
+    lfo.start(t); lfo.stop(t+dur+0.05);
+  }
+  osc.start(t); osc.stop(t+dur+0.02);
+}
+function playHarmony(note, t, dur){
+  const freq = noteToFreq(note);
+  const osc = actx.createOscillator(); osc.type = 'square';
+  osc.frequency.setValueAtTime(freq, t);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.07, t+0.01);
+  const relStart = t + Math.max(dur-0.01, 0.01);
+  g.gain.setValueAtTime(0.07, relStart);
+  g.gain.linearRampToValueAtTime(0, relStart+0.01);
+  osc.connect(g); g.connect(musicGain);
+  osc.start(t); osc.stop(t+dur+0.02);
+}
+function playBass(note, t, dur, fifth){
+  let freq = noteToFreq(note);
+  if(fifth) freq *= Math.pow(2, 7/12);
+  const osc = actx.createOscillator(); osc.type = 'triangle';
+  osc.frequency.setValueAtTime(freq, t);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.22, t+0.006);
+  g.gain.linearRampToValueAtTime(0, t+Math.max(dur*0.9,0.02));
+  osc.connect(g); g.connect(musicGain);
+  osc.start(t); osc.stop(t+dur+0.02);
+}
+function playKick(t){
+  const osc = actx.createOscillator(); osc.type = 'sine';
+  osc.frequency.setValueAtTime(120, t);
+  osc.frequency.exponentialRampToValueAtTime(45, t+0.09);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.5, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.09);
+  osc.connect(g); g.connect(musicGain);
+  osc.start(t); osc.stop(t+0.1);
+}
+function playSnare(t){
+  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
+  const bp = actx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1800; bp.Q.value=1;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.35, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.08);
+  src.connect(bp); bp.connect(g); g.connect(musicGain);
+  src.start(t); src.stop(t+0.09);
+}
+function playHat(t, gain){
+  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
+  const hp = actx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=6000;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(gain===undefined?0.05:gain, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.03);
+  src.connect(hp); hp.connect(g); g.connect(musicGain);
+  src.start(t); src.stop(t+0.035);
+}
+function playDrone(t, dur){
+  const osc = actx.createOscillator(); osc.type = 'triangle';
+  osc.frequency.setValueAtTime(noteToFreq('A2'), t);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.12, t+0.3);
+  g.gain.setValueAtTime(0.12, t+Math.max(dur-0.5,0.31));
+  g.gain.linearRampToValueAtTime(0, t+dur);
+  osc.connect(g); g.connect(musicGain);
+  osc.start(t); osc.stop(t+dur+0.05);
+}
+function playArp(note, t){
+  const osc = actx.createOscillator(); osc.type = 'sine';
+  osc.frequency.setValueAtTime(noteToFreq(note), t);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.1, t+0.02);
+  g.gain.setValueAtTime(0.1, t+0.15);
+  g.gain.linearRampToValueAtTime(0, t+0.15+1.5);
+  osc.connect(g); g.connect(musicGain);
+  osc.start(t); osc.stop(t+0.15+1.5+0.05);
+}
+function playTwang(t, gainMul){
+  gainMul = gainMul===undefined ? 1 : gainMul;
+  const dur = 1.1;
+  const burst = actx.createBufferSource(); burst.buffer = noiseBuffer;
+  const burstGain = actx.createGain();
+  burstGain.gain.setValueAtTime(1, t);
+  burstGain.gain.setValueAtTime(0, t+0.006);
+  const loopSum = actx.createGain(); loopSum.gain.value = 1;
+  const delay = actx.createDelay(1.0); delay.delayTime.value = 1/73.42;
+  const lpf = actx.createBiquadFilter(); lpf.type='lowpass'; lpf.frequency.value=4200; lpf.Q.value=0.5;
+  const comp = actx.createGain(); comp.gain.value = 0.83;
+  const fb = actx.createGain(); fb.gain.value = 0.985;
+  loopSum.connect(delay); delay.connect(lpf); lpf.connect(comp); comp.connect(fb); fb.connect(loopSum);
+  burst.connect(burstGain); burstGain.connect(loopSum);
+  const tap = actx.createGain(); tap.gain.value = 6.0;
+  comp.connect(tap);
+  const formant = actx.createBiquadFilter(); formant.type='bandpass'; formant.Q.value=6;
+  formant.frequency.setValueAtTime(400, t);
+  formant.frequency.linearRampToValueAtTime(1600, t+0.3);
+  const out = actx.createGain();
+  out.gain.setValueAtTime(0, t);
+  out.gain.linearRampToValueAtTime(0.5*gainMul, t+0.01);
+  out.gain.linearRampToValueAtTime(0, t+dur);
+  tap.connect(formant); formant.connect(out); out.connect(fxGain);
+  burst.start(t); burst.stop(t+dur+0.1);
+}
+function playBeep(t){
+  const osc = actx.createOscillator(); osc.type='square'; osc.frequency.value = 880;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.05, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.025);
+  osc.connect(g); g.connect(fxGain);
+  osc.start(t); osc.stop(t+0.03);
+}
+function playDing(t){
+  const osc = actx.createOscillator(); osc.type='sine'; osc.frequency.value = 1320;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.08);
+  osc.connect(g); g.connect(fxGain);
+  osc.start(t); osc.stop(t+0.09);
+}
+function playSlamBoom(t){
+  const osc = actx.createOscillator(); osc.type='sine';
+  osc.frequency.setValueAtTime(55, t);
+  osc.frequency.exponentialRampToValueAtTime(30, t+0.25);
+  const og = actx.createGain();
+  og.gain.setValueAtTime(0.6, t);
+  og.gain.exponentialRampToValueAtTime(0.001, t+0.25);
+  osc.connect(og); og.connect(fxGain);
+  osc.start(t); osc.stop(t+0.26);
+  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
+  const ng = actx.createGain();
+  ng.gain.setValueAtTime(0.5, t);
+  ng.gain.exponentialRampToValueAtTime(0.001, t+0.2);
+  src.connect(ng); ng.connect(fxGain);
+  src.start(t); src.stop(t+0.21);
+}
+function playFanfare(t){
+  const notes = [['C5',0,0.25],['E5',0.25,0.25],['G5',0.5,0.25],['B5',0.75,0.25],['C6',1,1.5]];
+  for(const [note,off,dur] of notes){
+    playLead(note, t+off, dur, note==='C6', 0.2);
+  }
+  playTwang(t+1, 0.9);
+}
+/* fake-death "victory" jingle -- just the first 4 notes of the fanfare, cut off
+   by the record scratch before the long C6 lands */
+function playJingleStart(t){
+  const notes = [['C5',0,0.22],['E5',0.25,0.22],['G5',0.5,0.22],['B5',0.75,0.35]];
+  for(const [note,off,dur] of notes) playLead(note, t+off, dur, false, 0.2);
+}
+/* DJ-style record scratch: fast noise pitch sweep via a resonant bandpass
+   swept down then a hair back up, gated by a short noisy envelope */
+function playRecordScratch(t){
+  const src = actx.createBufferSource(); src.buffer = noiseBuffer; src.loop = true;
+  const bp = actx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 8;
+  bp.frequency.setValueAtTime(2200, t);
+  bp.frequency.linearRampToValueAtTime(180, t+0.16);
+  bp.frequency.linearRampToValueAtTime(900, t+0.22);
+  bp.frequency.linearRampToValueAtTime(120, t+0.32);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.28, t);
+  g.gain.setValueAtTime(0.28, t+0.3);
+  g.gain.linearRampToValueAtTime(0, t+0.36);
+  src.connect(bp); bp.connect(g); g.connect(fxGain);
+  src.start(t); src.stop(t+0.4);
+}
+function playGlassShatter(t){
+  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
+  const hp = actx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=2500;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.4, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.35);
+  src.connect(hp); hp.connect(g); g.connect(fxGain);
+  src.start(t); src.stop(t+0.36);
+  for(let i=0;i<4;i++){
+    const o = actx.createOscillator(); o.type='sine';
+    o.frequency.setValueAtTime(1800+Math.random()*1400, t+i*0.02);
+    const og = actx.createGain();
+    og.gain.setValueAtTime(0.06, t+i*0.02);
+    og.gain.exponentialRampToValueAtTime(0.001, t+i*0.02+0.12);
+    o.connect(og); og.connect(fxGain);
+    o.start(t+i*0.02); o.stop(t+i*0.02+0.13);
+  }
+}
+function playThud(t){
+  const osc = actx.createOscillator(); osc.type='sine';
+  osc.frequency.setValueAtTime(160, t);
+  osc.frequency.exponentialRampToValueAtTime(70, t+0.12);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.3, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.13);
+  osc.connect(g); g.connect(fxGain);
+  osc.start(t); osc.stop(t+0.14);
+}
+/* deadpan "wah wah wah" -- 3 descending low square notes, for jumping the punchline early */
+function playGroan(t){
+  const notes = ['G3','E3','C3'];
+  notes.forEach((n,i)=>{
+    const off = i*0.14;
+    const osc = actx.createOscillator(); osc.type='square';
+    osc.frequency.setValueAtTime(noteToFreq(n), t+off);
+    const g = actx.createGain();
+    g.gain.setValueAtTime(0.12, t+off);
+    g.gain.exponentialRampToValueAtTime(0.001, t+off+0.13);
+    osc.connect(g); g.connect(fxGain);
+    osc.start(t+off); osc.stop(t+off+0.14);
+  });
+}
+/* short downward bandpassed noise sweep -- the boss dodging a throw */
+function playWhoosh(t){
+  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
+  const bp = actx.createBiquadFilter(); bp.type='bandpass'; bp.Q.value=4;
+  bp.frequency.setValueAtTime(2200, t);
+  bp.frequency.exponentialRampToValueAtTime(300, t+0.35);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.22, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.4);
+  src.connect(bp); bp.connect(g); g.connect(fxGain);
+  src.start(t); src.stop(t+0.42);
+}
+function playPickupChime(t){
+  [['E5',0],['A5',0.06]].forEach(([n,off])=>{
+    const osc = actx.createOscillator(); osc.type='sine';
+    osc.frequency.setValueAtTime(noteToFreq(n), t+off);
+    const g = actx.createGain();
+    g.gain.setValueAtTime(0.1, t+off);
+    g.gain.exponentialRampToValueAtTime(0.001, t+off+0.14);
+    osc.connect(g); g.connect(fxGain);
+    osc.start(t+off); osc.stop(t+off+0.15);
+  });
+}
+/* short two-note "ha-ha" staccato blip, layered on top of the pickup chime */
+function playHaBlip(t){
+  [0,0.09].forEach((off)=>{
+    const osc = actx.createOscillator(); osc.type='square';
+    osc.frequency.setValueAtTime(noteToFreq('C6'), t+off);
+    const g = actx.createGain();
+    g.gain.setValueAtTime(0.06, t+off);
+    g.gain.exponentialRampToValueAtTime(0.001, t+off+0.07);
+    osc.connect(g); g.connect(fxGain);
+    osc.start(t+off); osc.stop(t+off+0.08);
+  });
+}
+/* low filtered-noise swell -- the critic's transformation moment */
+function playRumble(t){
+  const src = actx.createBufferSource(); src.buffer = noiseBuffer; src.loop = true;
+  const lp = actx.createBiquadFilter(); lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(70, t);
+  lp.frequency.linearRampToValueAtTime(240, t+0.3);
+  lp.frequency.linearRampToValueAtTime(60, t+0.65);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.32, t+0.3);
+  g.gain.linearRampToValueAtTime(0, t+0.65);
+  src.connect(lp); lp.connect(g); g.connect(fxGain);
+  src.start(t); src.stop(t+0.7);
+}
+function duckDown(t, target){
+  const g = musicGain.gain;
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(g.value, t);
+  g.linearRampToValueAtTime(target===undefined?0.02:target, t+0.08);
+}
+function duckUp(t, level){
+  level = level===undefined ? 1.0 : level;
+  const g = musicGain.gain;
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(g.value, t);
+  g.linearRampToValueAtTime(level, t+0.3);
+}
+function setMusicLevel(level, t, rampTime){
+  const g = musicGain.gain;
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(g.value, t);
+  g.linearRampToValueAtTime(level, t+(rampTime===undefined?1.0:rampTime));
+}
+
+/* ---------------- composed music data (same original tables as the intro) ---------------- */
+const THEME_A = {
+  lead: [
+    ['A4',0,1.5],['B4',1.5,0.5],['C5',2,2],['E5',4,3],['D5',7,1],
+    ['C5',8,1],['D5',9,1],['E5',10,1],['G5',11,1],['A5',12,3],
+    ['G5',16,2],['E5',18,2],['F5',20,1],['E5',21,1],['D5',22,2],
+    ['E5',24,1],['D5',25,1],['C5',26,1],['B4',27,1],['A4',28,3.5]
+  ],
+  bassRoots: ['A2','A2','C3','A2','E2','D2','E2','A2'],
+  twangBeats: [12, 28]
+};
+const THEME_B = {
+  lead: [
+    ['C5',0,1.5],['D5',1.5,0.5],['E5',2,2],['G5',4,3],['E5',7,1],
+    ['F5',8,1],['G5',9,1],['A5',10,2],['G5',12,4],
+    ['E5',16,1.5],['F5',17.5,0.5],['G5',18,2],['C6',20,3],['B5',23,1],
+    ['A5',24,1],['G5',25,1],['E5',26,1],['D5',27,1],['C5',28,3.5]
+  ],
+  bassRoots: ['C3','C3','F2','G2','C3','A2','F2+G2','A2'],
+  twangBeats: [28]
+};
+
+/* ---------------- generalized lookahead scheduler / music director ----------------
+   Unlike the intro (one fixed BPM, infinite A-A-B-A loop), the game needs tempo,
+   drums/harmony/hat-density and the section program itself to change live as the
+   player moves between beats. `musicDir` holds the mutable settings; dispatch-time
+   flags (drumsOn / harmonyOn / hatsSixteenths) let already-generated events react
+   to a beat change without needing to be regenerated. */
+const SCHED_INTERVAL_MS = 25;
+const SCHED_LOOKAHEAD = 0.12;
+let eventQueue = [];
+let audioT0 = null;
+let schedulerTimer = null;
+const musicDir = {
+  bpm: 112,
+  beat: BEAT_DEFAULT,
+  program: null,      // (startTime) => 'A' | 'B' | null(stop)
+  generatedUpTo: 0,
+  droneOn: false
+};
+
+function pushSorted(batch){
+  batch.sort((a,b)=>a.time-b.time);
+  eventQueue.push(...batch);
+}
+function generateSectionEvents(name, startTime, beatDur, opts){
+  opts = opts || {};
+  const data = name==='A' ? THEME_A : THEME_B;
+  const batch = [];
+  for(const [note,sb,dur] of data.lead){
+    batch.push({time:startTime+sb*beatDur, type:'lead', note, dur:dur*beatDur, vibrato:dur>=2});
+    if(opts.harmony){
+      batch.push({time:startTime+sb*beatDur, type:'harmony', note:diatonicThirdBelow(note), dur:dur*beatDur});
+    }
+  }
+  for(let bar=0; bar<8; bar++){
+    const barStart = startTime + bar*4*beatDur;
+    const rootSpec = data.bassRoots[bar];
+    if(rootSpec.indexOf('+') >= 0){
+      const parts = rootSpec.split('+');
+      [0,0.5,1,1.5].forEach(p=> batch.push({time:barStart+p*beatDur, type:'bass', note:parts[0], dur:0.5*beatDur}));
+      [2,2.5,3,3.5].forEach(p=> batch.push({time:barStart+p*beatDur, type:'bass', note:parts[1], dur:0.5*beatDur}));
+    } else {
+      const fifthPos = new Set([1.5,3.5]);
+      [0,0.5,1,1.5,2,2.5,3,3.5].forEach(p=>{
+        batch.push({time:barStart+p*beatDur, type:'bass', note:rootSpec, dur:0.5*beatDur, fifth:fifthPos.has(p)});
+      });
+    }
+    batch.push({time:barStart+0*beatDur, type:'kick'});
+    batch.push({time:barStart+2*beatDur, type:'kick'});
+    batch.push({time:barStart+1*beatDur, type:'snare'});
+    batch.push({time:barStart+3*beatDur, type:'snare'});
+    const hatN = opts.hatsSixteenths ? 16 : 8;
+    for(let e=0;e<hatN;e++) batch.push({time:barStart+e*(4*beatDur/hatN), type:'hat', gain:opts.hatsSixteenths?0.035:0.05});
+  }
+  for(const tb of data.twangBeats){
+    batch.push({time:startTime+tb*beatDur, type:'twang'});
+  }
+  if(opts.drone){
+    batch.push({time:startTime, type:'drone', dur:32*beatDur+0.3});
+  }
+  pushSorted(batch);
+  return startTime + 32*beatDur;
+}
+/* the composed chiptune note types -- silenced (not un-scheduled, just not
+   sounded) whenever the real mp3 track is confirmed playing */
+const MUSIC_NOTE_TYPES_GAME = new Set(['lead','harmony','bass','kick','snare','hat','drone','arp','twang']);
+function dispatchEvent(ev, atTime){
+  if(useMp3Music && MUSIC_NOTE_TYPES_GAME.has(ev.type)) return;
+  switch(ev.type){
+    case 'lead': playLead(ev.note, atTime, ev.dur, ev.vibrato); break;
+    case 'harmony': if(harmonyOn) playHarmony(ev.note, atTime, ev.dur); break;
+    case 'bass': playBass(ev.note, atTime, ev.dur, ev.fifth); break;
+    case 'kick': if(drumsOn) playKick(atTime); break;
+    case 'snare': if(drumsOn) playSnare(atTime); break;
+    case 'hat': if(drumsOn) playHat(atTime, ev.gain); break;
+    case 'twang': playTwang(atTime); break;
+    case 'drone': playDrone(atTime, ev.dur); break;
+    case 'arp': playArp(ev.note, atTime); break;
+  }
+}
+function schedulerTick(){
+  if(!actx) return;
+  const songTime = actx.currentTime - audioT0;
+  while(musicDir.program && musicDir.generatedUpTo < songTime + 1.0){
+    const name = musicDir.program(musicDir.generatedUpTo);
+    if(!name) break;
+    musicDir.generatedUpTo = generateSectionEvents(name, musicDir.generatedUpTo, musicDir.beat, {
+      harmony: harmonyOn, hatsSixteenths, drone: musicDir.droneOn
+    });
+  }
+  while(eventQueue.length && eventQueue[0].time <= songTime + SCHED_LOOKAHEAD){
+    const ev = eventQueue.shift();
+    dispatchEvent(ev, audioT0 + ev.time);
+  }
+}
+/* clear the future queue and switch to a new looping/one-shot program at a given BPM */
+function setMusicProgram(programFn, bpm){
+  const now = actx ? (actx.currentTime - audioT0) : 0;
+  eventQueue = [];
+  if(bpm) { musicDir.bpm = bpm; musicDir.beat = 60/bpm; }
+  musicDir.generatedUpTo = now;
+  musicDir.program = programFn;
+}
+function loopProgram(name){ return ()=> name; }
+function onceProgram(names){
+  const q = names.slice();
+  return ()=> q.length ? q.shift() : null;
+}
+function startScheduler(){
+  eventQueue = [];
+  musicDir.generatedUpTo = 0;
+  musicDir.program = null;
+  if(schedulerTimer) clearInterval(schedulerTimer);
+  schedulerTick();
+  schedulerTimer = setInterval(schedulerTick, SCHED_INTERVAL_MS);
+}
+/* short one-shot drone+arpeggio interlude (real death / soft moments), scheduled
+   directly rather than through the section program since it doesn't loop */
+function playSoftInterlude(t){
+  playDrone(t, 6.5);
+  const notes = ['A3','C4','E4','A4','A3','C4'];
+  notes.forEach((n,i)=> playArp(n, t+i*2*BEAT_DEFAULT));
+}
+
+/* ======================================================================
+   ARENA -- one room, the dinner party (coordinates snapped to an 8px grid)
+   ====================================================================== */
+const WALL_TOP = 80, WALL_SIDE = 48;
+const LEFT_DOOR = {x:0, y:248, w:WALL_SIDE, h:104};
+const TABLE = {x:336, y:248, w:288, h:120};
+const BOSS_DOOR = {x:848, y:280, w:104, h:128};
+/* kitchen doorway: a low wall stub along the bottom-right edge with a dark
+   gap cut into it (the player spawns just in front of the gap), and a
+   subtle warm light pool spilling from the gap onto the floor. */
+const KITCHEN_DOOR = {x:760, y:500, w:152, h:40, gapX:800, gapW:80};
+const KITCHEN_GLOW = {x:840, y:508, r:200};
+const PLAYER_SPAWN = {x:840, y:472};
+/* on open floor below-right of the table (not inside its solid rect), so the
+   player can actually stand within pickup radius of it -- the old spot
+   {480,262} was 14px inside TABLE, which collision keeps the player out of,
+   so distance-to-pickup could never drop below the old 20px radius. */
+const BOTTLE_SPAWN = {x:660, y:396};
+
+function drawArena(ctx){
+  // floor everywhere first
+  for(let x=0;x<CW;x+=64){
+    for(let y=0;y<CH;y+=64){
+      drawTile(ctx, tintedSprite(imgDungeon,1,3,PAL.floor), x, y, 4, false);
+    }
+  }
+  // floor seams
+  ctx.fillStyle = '#241a10';
+  for(let x=0;x<=CW;x+=64){ ctx.fillRect(x,0,2,CH); }
+  for(let y=0;y<=CH;y+=64){ ctx.fillRect(0,y,CW,2); }
+  ctx.fillStyle = '#4a3624';
+  for(let x=32;x<CW;x+=64){ ctx.fillRect(x,0,1,CH); }
+
+  // top wall
+  for(let x=0;x<CW;x+=64){
+    drawTile(ctx, tintedSprite(imgDungeon,0,0,PAL.wall), x, 0, 4, false);
+  }
+  ctx.fillStyle = PAL.wall;
+  ctx.fillRect(0,0,CW,WALL_TOP);
+
+  // left wall with the main door cut into it
+  ctx.fillRect(0,0,WALL_SIDE,CH);
+  ctx.fillStyle = '#120c14';
+  ctx.fillRect(LEFT_DOOR.x, LEFT_DOOR.y, LEFT_DOOR.w, LEFT_DOOR.h);
+  ctx.fillStyle = PAL.wood;
+  ctx.fillRect(LEFT_DOOR.x, LEFT_DOOR.y-6, LEFT_DOOR.w+6, 6);
+  ctx.fillRect(LEFT_DOOR.x, LEFT_DOOR.y, 6, LEFT_DOOR.h);
+  ctx.fillRect(LEFT_DOOR.x, LEFT_DOOR.y+LEFT_DOOR.h, LEFT_DOOR.w+6, 6);
+
+  // right wall (the boss door pops into existence against this later)
+  ctx.fillStyle = PAL.wall;
+  ctx.fillRect(CW-WALL_SIDE,0,WALL_SIDE,CH);
+
+  // kitchen doorway: low wall stub + dark gap, bottom-right, where the player
+  // spawns. The light pool is low-alpha stepped bands (like the intro's item-
+  // get spotlight) so it reads as a spill of light, not a solid glow blob --
+  // floor tiles/seams stay visible through it.
+  ctx.fillStyle = PAL.wall;
+  ctx.fillRect(KITCHEN_DOOR.x, KITCHEN_DOOR.y, KITCHEN_DOOR.w, KITCHEN_DOOR.h);
+  const bands = [[200,0.05],[150,0.08],[100,0.12],[60,0.16]];
+  for(const [r,a] of bands){
+    ctx.save(); ctx.globalAlpha = a;
+    drawPixelCircle(ctx, KITCHEN_GLOW.x, KITCHEN_GLOW.y, r, PAL.glowHi, 8);
+    ctx.restore();
+  }
+  ctx.fillStyle = '#120c14';
+  ctx.fillRect(KITCHEN_DOOR.gapX, KITCHEN_DOOR.y, KITCHEN_DOOR.gapW, KITCHEN_DOOR.h);
+  ctx.fillStyle = PAL.wood;
+  ctx.fillRect(KITCHEN_DOOR.gapX-4, KITCHEN_DOOR.y, 4, KITCHEN_DOOR.h);
+  ctx.fillRect(KITCHEN_DOOR.gapX+KITCHEN_DOOR.gapW, KITCHEN_DOOR.y, 4, KITCHEN_DOOR.h);
+}
+
+function drawTableAndProps(ctx){
+  ctx.fillStyle = PAL.wood; ctx.fillRect(TABLE.x, TABLE.y, TABLE.w, TABLE.h);
+  ctx.fillStyle = PAL.terracotta; ctx.fillRect(TABLE.x+4, TABLE.y+4, TABLE.w-8, TABLE.h-8);
+  drawPixelCircle(ctx, 400, 272, 10, PAL.cream, 2);
+  drawPixelCircle(ctx, 560, 272, 10, PAL.cream, 2);
+  drawPixelCircle(ctx, 400, 332, 10, PAL.cream, 2);
+  drawPixelCircle(ctx, 560, 332, 10, PAL.cream, 2);
+  [460,500].forEach(gx=>{
+    ctx.fillStyle = '#7a1f2a'; ctx.fillRect(gx-6,286,12,10);
+    ctx.fillStyle = PAL.wood; ctx.fillRect(gx-1,296,2,10); ctx.fillRect(gx-5,306,10,3);
+  });
+}
+
+/* the 4 seated diners -- same picks/positions as the intro's dinner vignette.
+   Index CRITIC_INDEX is the one who later stands up and becomes the boss;
+   once he starts walking (diners[CRITIC_INDEX].walking) his seat renders empty. */
+const CRITIC_INDEX = 1;
+const DINER_DEFS = [
+  {col:1,row:7, x:400,y:248, flip:false},
+  {col:4,row:8, x:560,y:248, flip:false},
+  {col:3,row:8, x:400,y:432, flip:true},
+  {col:2,row:8, x:560,y:432, flip:true}
+];
+function drawDinerSprite(ctx, col, row, x, y, flip){
+  drawTile(ctx, rawTile(imgDungeon,col,row), x-32, y-64, 4, flip);
+}
+function drawSeatedDiners(ctx, diners){
+  for(let i=0;i<diners.length;i++){
+    const d = diners[i];
+    if(d.walking || d.retired) continue;
+    drawDinerSprite(ctx, d.col, d.row, d.x, d.y, d.flip);
+  }
+}
+
+/* ---------------- chef (player) ---------------- */
+function drawChef(ctx, x, y, facing, bobT){
+  const bob = Math.sin(bobT*10) * (bobT>0?1:0);
+  const flipY = facing==='up';
+  const flipX = facing==='left';
+  drawTile(ctx, rawTile(imgDungeon,2,7), x-32, y-64+bob, 4, flipY, flipX);
+  drawToque(ctx, x-16, y-74+bob, 4);
+}
+/* held out at his side, in addition to the HUD corner icon -- obvious at a
+   glance that he's armed. Same bob formula as drawChef so it moves with him. */
+function drawHeldBottle(ctx, x, y, facing, bobT){
+  const bob = Math.sin(bobT*10) * (bobT>0?1:0);
+  const side = facing==='left' ? -1 : 1;
+  const hx = x + side*20, hy = y - 30 + bob;
+  drawBottle(ctx, hx-6, hy-16, 3);
+}
+
+/* ---------------- the critic (boss) ---------------- */
+function drawBossDoorFrame(ctx, popT){
+  popT = popT===undefined ? 1 : popT;
+  const w = BOSS_DOOR.w*popT, h = BOSS_DOOR.h*popT;
+  const x = BOSS_DOOR.x + (BOSS_DOOR.w-w)/2, y = BOSS_DOOR.y + (BOSS_DOOR.h-h)/2;
+  ctx.fillStyle = PAL.wood;
+  ctx.fillRect(x-8, y-8, w+16, h+16);
+  ctx.fillStyle = '#120c14';
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = PAL.wood;
+  ctx.fillRect(x+6, y+h*0.5-2, w-12, 4);
+}
+function drawBossSagged(ctx, alpha){
+  // the door "sags shut" after the real death -- drawn as a shrinking, fading frame
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  drawBossDoorFrame(ctx, 1);
+  ctx.restore();
+}
+let criticSpriteCache = null, criticSpritePhase2Cache = null;
+function buildCriticSprite(tintRGBA){
+  // darker clothing palette via a source-atop tint on an ISOLATED offscreen
+  // canvas (containing only the sprite, nothing else) -- source-atop on the
+  // shared main canvas would also darken whatever scenery happens to sit
+  // under the fillRect, so it has to be composited in isolation first.
+  const off = document.createElement('canvas');
+  off.width = 16; off.height = 16;
+  const o = off.getContext('2d');
+  o.imageSmoothingEnabled = false;
+  o.drawImage(rawTile(imgDungeon,4,8), 0, 0, 16, 16);
+  o.globalCompositeOperation = 'source-atop';
+  o.fillStyle = tintRGBA;
+  o.fillRect(0, 0, 16, 16);
+  return off;
+}
+function getCriticSprite(phase2){
+  // lazily built -- safe to cache unconditionally because every call site
+  // already gates drawCritic behind assetsReady, so imgDungeon is loaded.
+  if(phase2){
+    if(!criticSpritePhase2Cache) criticSpritePhase2Cache = buildCriticSprite('rgba(50,10,16,0.5)');
+    return criticSpritePhase2Cache;
+  }
+  if(!criticSpriteCache) criticSpriteCache = buildCriticSprite('rgba(18,14,26,0.45)');
+  return criticSpriteCache;
+}
+function drawCriticAura(ctx, cx, topY, size, phase2, t){
+  const speed = phase2 ? 5 : 3;
+  const pulse = 0.5 + 0.5*Math.sin(t*speed);
+  const r = size*0.5 + pulse*10;
+  ctx.save();
+  ctx.globalAlpha = 0.08 + pulse*0.10;
+  drawPixelCircle(ctx, cx, topY+size*0.5, r, phase2?'#8c141e':'#140a1e', 4);
+  ctx.restore();
+}
+function drawGlassesGlint(ctx, cx, topY, size, phase2, t){
+  const cyc = ((t%2.5)+2.5)%2.5;
+  if(cyc < 0.15){
+    drawSparkle(ctx, cx, topY+size*0.3, 3, 1, phase2?'#ff4a4a':'#ffffff');
+  }
+}
+/* looms out of the doorframe at ~1.8x (phase 2: ~2.1x) the seated-diner
+   scale, darker palette, pulsing aura, periodic glasses glint. `growT` (0..1)
+   interpolates from normal (1x) size up to targetScale for the 0.6s
+   transformation beat; afterward growT is always 1 so effScale===targetScale.
+   Bottom-anchored (feet stay at x,y) so he grows upward out of the frame
+   rather than growing from its center. Presentation only -- boss.x/y and
+   every gameplay computation that reads them are untouched. */
+function drawCritic(ctx, x, y, poseT, slumped, growT, targetScale, phase2){
+  growT = growT===undefined ? 1 : growT;
+  targetScale = targetScale===undefined ? 1.8 : targetScale;
+  const effScale = lerp(1, targetScale, growT);
+  const size = 64*effScale;
+  const bob = slumped ? 0 : Math.sin(poseT*3)*1.5;
+  const drawY = slumped ? -size*0.75 : -size;
+  ctx.save();
+  ctx.translate(x, y+bob);
+  ctx.imageSmoothingEnabled = false;
+  drawCriticAura(ctx, 0, drawY, size, phase2, poseT);
+  ctx.drawImage(getCriticSprite(phase2), -size/2, drawY, size, size);
+  drawGlassesGlint(ctx, 0, drawY, size, phase2, poseT);
+  ctx.restore();
+}
+function drawWoman(ctx, x, y, walkT){
+  const bob = Math.sin(walkT*8)*1.5;
+  drawTile(ctx, rawTile(imgDungeon,3,8), x-32, y-64+bob, 4, false);
+}
+
+/* ---------------- Aram, the chef's boss (Beat 4) ----------------
+   Same isolated-offscreen tint trick as the critic (buildCriticSprite),
+   reusing the chef's own base sprite tile so there's no risk of picking an
+   unintended tile from the sheet -- just a darker, angrier recolor at ~2x
+   diner scale. A second warm/no-brows tint covers the "turned good" beat. */
+let aramSpriteCache = null, aramGoodSpriteCache = null;
+function buildAramSprite(tintRGBA){
+  const off = document.createElement('canvas');
+  off.width = 16; off.height = 16;
+  const o = off.getContext('2d');
+  o.imageSmoothingEnabled = false;
+  o.drawImage(rawTile(imgDungeon,2,7), 0, 0, 16, 16);
+  o.globalCompositeOperation = 'source-atop';
+  o.fillStyle = tintRGBA;
+  o.fillRect(0, 0, 16, 16);
+  return off;
+}
+function getAramSprite(good){
+  if(good){
+    if(!aramGoodSpriteCache) aramGoodSpriteCache = buildAramSprite('rgba(196,120,40,0.5)');
+    return aramGoodSpriteCache;
+  }
+  if(!aramSpriteCache) aramSpriteCache = buildAramSprite('rgba(120,18,18,0.55)');
+  return aramSpriteCache;
+}
+const ARAM_SIZE = 128; // ~2x diner scale (diner draw is TILE*4 = 64px)
+function drawAram(ctx, x, y, poseT, walkT, good){
+  const bob = Math.sin(walkT*8)*1.5;
+  const size = ARAM_SIZE;
+  ctx.save();
+  ctx.translate(x, y+bob);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(getAramSprite(good), -size/2, -size, size, size);
+  if(!good){
+    // simple hand-drawn angry brows -- two dark angled bars over the upper face
+    ctx.fillStyle = '#1a0a0a';
+    for(const side of [-1,1]){
+      ctx.save();
+      ctx.translate(side*size*0.18, -size*0.74);
+      ctx.rotate(side*0.35);
+      ctx.fillRect(-size*0.12, 0, size*0.24, size*0.045);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+const STAR_ROWS = ['..1..','.111.','11111','.111.','1.1.1'];
+function drawStarIcon(ctx, x, y, filled, cell){
+  cell = cell || 4;
+  drawBitmap(ctx, STAR_ROWS, {'1': filled?PAL.gold:PAL.heartEmpty}, x, y, cell);
+}
+
+/* speech synthesis -- feature-detected, silent fallback per spec */
+let speechWorked = null;
+function speakLine(text, rate, pitch){
+  if(!('speechSynthesis' in window)){ if(speechWorked===null) speechWorked=false; return false; }
+  try{
+    const voices = window.speechSynthesis.getVoices();
+    if(!voices || voices.length===0){ if(speechWorked===null) speechWorked=false; return false; }
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = rate; u.pitch = pitch; u.voice = voices[0];
+    window.speechSynthesis.speak(u);
+    speechWorked = true;
+    return true;
+  }catch(e){ if(speechWorked===null) speechWorked=false; return false; }
+}
+function speakForFree(){ speakLine('For free?', 0.85, 0.7); }
+function speakCritique(text){ if(speechWorked===true) speakLine(text, 1.0, 0.6); }
+
+/* ======================================================================
+   COLLISION (8px-grid-aligned solids) + PLAYER MOVEMENT
+   ====================================================================== */
+function rectsOverlap(ax,ay,aw,ah,bx,by,bw,bh){
+  return ax<bx+bw && ax+aw>bx && ay<by+bh && ay+ah>by;
+}
+function arenaSolids(diners){
+  const solids = [
+    {x:0,y:0,w:CW,h:WALL_TOP},
+    {x:0,y:WALL_TOP,w:WALL_SIDE,h:LEFT_DOOR.y-WALL_TOP},
+    {x:0,y:LEFT_DOOR.y+LEFT_DOOR.h,w:WALL_SIDE,h:CH-(LEFT_DOOR.y+LEFT_DOOR.h)},
+    {x:CW-WALL_SIDE,y:WALL_TOP,w:WALL_SIDE,h:CH-WALL_TOP},
+    {x:TABLE.x,y:TABLE.y,w:TABLE.w,h:TABLE.h}
+  ];
+  if(diners){
+    for(const d of diners){
+      if(d.walking || d.retired) continue;
+      solids.push({x:d.x-16,y:d.y-16,w:32,h:32});
+    }
+  }
+  return solids;
+}
+function moveAndCollide(entity, dx, dy, solids, r){
+  r = r===undefined ? 14 : r;
+  entity.x += dx;
+  for(const s of solids){
+    if(rectsOverlap(entity.x-r,entity.y-r,r*2,r*2,s.x,s.y,s.w,s.h)){ entity.x -= dx; break; }
+  }
+  entity.y += dy;
+  for(const s of solids){
+    if(rectsOverlap(entity.x-r,entity.y-r,r*2,r*2,s.x,s.y,s.w,s.h)){ entity.y -= dy; break; }
+  }
+  entity.x = Math.max(r, Math.min(CW-r, entity.x));
+  entity.y = Math.max(r, Math.min(CH-r, entity.y));
+}
+
+/* ======================================================================
+   PROJECTILES -- napkins (boss) and riesling bottles (player), both lobbed
+   arcs: constant horizontal velocity + a parabolic height (z) that lands
+   exactly on target at t=duration. The ground-shadow is drawn at the fixed
+   TARGET point for the whole flight, which is the "telegraph" the spec asks
+   for -- the player can read the landing spot the instant it's thrown.
+   ====================================================================== */
+const GRAVITY = 900;
+let napkins = [], bottles = [], particles = [], heartPickups = [];
+
+function spawnNapkin(fromX, fromY, toX, toY, duration){
+  const vz = 0.5*GRAVITY*duration;
+  napkins.push({
+    x:fromX, y:fromY, vx:(toX-fromX)/duration, vy:(toY-fromY)/duration,
+    z:0, vz, t:0, duration, targetX:toX, targetY:toY, landed:false, landT:0, big:false
+  });
+}
+function updateNapkins(dt, gameT){
+  for(const n of napkins){
+    if(n.landed) continue;
+    n.t += dt;
+    n.x += n.vx*dt; n.y += n.vy*dt;
+    n.z = n.vz*n.t - 0.5*GRAVITY*n.t*n.t;
+    if(n.t >= n.duration){
+      n.landed = true; n.landAt = gameT;
+      for(let i=0;i<8;i++){
+        const ang = Math.random()*Math.PI*2;
+        particles.push({type:'splash', x:n.targetX, y:n.targetY, vx:Math.cos(ang)*70, vy:Math.sin(ang)*70-30, born:gameT, life:0.4, color:PAL.napkin});
+      }
+    }
+  }
+  napkins = napkins.filter(n=> !n.landed || (gameT-n.landAt)<0.3);
+}
+function drawNapkins(ctx){
+  for(const n of napkins){
+    if(n.landed) continue;
+    drawShadow(ctx, n.targetX, n.targetY, n.big?9:6, 0.3);
+    drawNapkin(ctx, n.x, n.y-n.z, n.big?7:5);
+  }
+}
+
+function spawnBottleThrow(fromX, fromY, toX, toY, duration){
+  const vz = 0.5*GRAVITY*duration;
+  bottles.push({
+    x:fromX, y:fromY, vx:(toX-fromX)/duration, vy:(toY-fromY)/duration,
+    z:0, vz, t:0, duration, targetX:toX, targetY:toY, landed:false, landAt:0, thrown:true
+  });
+}
+function updateBottles(dt, gameT){
+  for(const b of bottles){
+    if(!b.thrown || b.landed) continue;
+    b.t += dt;
+    b.x += b.vx*dt; b.y += b.vy*dt;
+    b.z = b.vz*b.t - 0.5*GRAVITY*b.t*b.t;
+    if(b.t >= b.duration){ b.landed = true; b.landAt = gameT; }
+  }
+  bottles = bottles.filter(b=> !b.landed || (gameT-b.landAt)<0.3);
+}
+function drawBottles(ctx){
+  for(const b of bottles){
+    if(b.landed) continue;
+    drawShadow(ctx, b.targetX, b.targetY, 6, 0.3);
+    drawBottle(ctx, b.x-6, b.y-b.z-16, 3);
+  }
+}
+/* attention cue for the table-edge pickup: a slow alpha pulse plus a small
+   periodic sparkle overhead, so it doesn't just blend into the table. */
+function drawBottlePickupCue(ctx, gameT){
+  const pulse = 0.75 + 0.25*Math.sin(gameT*3);
+  ctx.save(); ctx.globalAlpha = pulse;
+  drawBottle(ctx, bottlePickup.x-6, bottlePickup.y-16, 3);
+  ctx.restore();
+  const cyc = gameT % 1.6;
+  if(cyc < 0.5){
+    drawSparkle(ctx, bottlePickup.x, bottlePickup.y-26, sparkleFrameSize(gameT,0.5), 0.9, PAL.gold);
+  }
+}
+
+/* ---------------- heart pickups (the post-punchline scatter) ----------------
+   Tokens are lobbed on a napkin-style z-arc from the table center out to a
+   pre-vetted floor point beyond the table's edge, rather than sliding on flat
+   2D friction -- the old friction model only ever traveled ~10-35px before
+   settling (well short of the table's ~144px half-width), so tokens routinely
+   came to rest ON the (solid) table where the player could never reach them.
+   Every landing spot is checked against isOnReachableFloor before it's ever
+   assigned, AND re-checked (with a guaranteed slide-out) the instant a token
+   settles -- belt and suspenders, so no token can ever end its life on the
+   table, inside a wall, or within ~24px of one. */
+function pointInRect(x,y,r){ return x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h; }
+function isOnReachableFloor(x, y){
+  if(x < WALL_SIDE+24 || x > CW-WALL_SIDE-24) return false;
+  if(y < WALL_TOP+24 || y > CH-24) return false;
+  if(pointInRect(x,y,TABLE)) return false;
+  return true;
+}
+/* nudge a point that failed isOnReachableFloor back onto valid floor -- pushed
+   out through the nearest table edge (if inside it), then clamped to the
+   wall-margin bounds */
+function slideToOpenFloor(x, y){
+  if(pointInRect(x,y,TABLE)){
+    const left = x-TABLE.x, right = (TABLE.x+TABLE.w)-x, top = y-TABLE.y, bottom = (TABLE.y+TABLE.h)-y;
+    const m = Math.min(left,right,top,bottom);
+    if(m===left) x = TABLE.x-20;
+    else if(m===right) x = TABLE.x+TABLE.w+20;
+    else if(m===top) y = TABLE.y-20;
+    else y = TABLE.y+TABLE.h+20;
+  }
+  x = Math.max(WALL_SIDE+26, Math.min(CW-WALL_SIDE-26, x));
+  y = Math.max(WALL_TOP+26, Math.min(CH-26, y));
+  return {x,y};
+}
+/* random point on open floor around (cx,cy), well beyond the table's own
+   footprint, re-rolled until it clears isOnReachableFloor (falls back to a
+   guaranteed slide-out if every roll fails) */
+function pickHeartLandingSpot(cx, cy){
+  for(let tries=0; tries<12; tries++){
+    const ang = Math.random()*Math.PI*2;
+    const r = 90 + Math.random()*170; // beyond TABLE's ~144px half-width
+    const x = cx + Math.cos(ang)*r, y = cy + Math.sin(ang)*r;
+    if(isOnReachableFloor(x,y)) return {x,y};
+  }
+  return slideToOpenFloor(cx, cy);
+}
+function spawnHeartBurst(n, cx, cy, gameT){
+  for(let i=0;i<n;i++){
+    const target = pickHeartLandingSpot(cx, cy);
+    const duration = 0.45 + Math.random()*0.25;
+    heartPickups.push({
+      x:cx, y:cy, fromX:cx, fromY:cy, targetX:target.x, targetY:target.y,
+      t:0, duration, z:0, vz:0.5*GRAVITY*duration,
+      settled:false, born:gameT, life:6.0, collected:false, blinkT:Math.random()*Math.PI*2
+    });
+  }
+}
+/* full-heal chip dropped in place at the boss's real death -- an instant
+   (near-zero-duration) "arc" so it uses the same settle/guarantee code path
+   as the scattered tokens above without visibly moving from its drop point */
+function spawnBigHeart(cx, cy, gameT){
+  heartPickups.push({
+    x:cx, y:cy, fromX:cx, fromY:cy, targetX:cx, targetY:cy,
+    t:0, duration:0.01, z:0, vz:0,
+    settled:false, born:gameT, life:9999, collected:false, blinkT:0, big:true
+  });
+}
+function updateHeartPickups(dt, gameT, player, stats){
+  for(const h of heartPickups){
+    if(h.collected) continue;
+    if(!h.settled){
+      h.t += dt;
+      const p = Math.min(1, h.t/h.duration);
+      h.x = h.fromX + (h.targetX-h.fromX)*p;
+      h.y = h.fromY + (h.targetY-h.fromY)*p;
+      h.z = h.vz*h.t - 0.5*GRAVITY*h.t*h.t;
+      if(h.t >= h.duration){
+        h.settled = true; h.z = 0;
+        h.x = h.targetX; h.y = h.targetY;
+        if(!isOnReachableFloor(h.x, h.y)){
+          const safe = slideToOpenFloor(h.x, h.y);
+          h.x = safe.x; h.y = safe.y;
+        }
+      }
+    }
+    h.blinkT += dt*4;
+    const d = Math.hypot(player.x-h.x, player.y-h.y);
+    if(d < 20){
+      h.collected = true;
+      player.hearts = Math.min(player.maxHearts, player.hearts+1);
+      stats.heartsCaptured++;
+      if(actx){ playPickupChime(actx.currentTime); playHaBlip(actx.currentTime+0.1); }
+    }
+  }
+  heartPickups = heartPickups.filter(h=> !h.collected && (gameT-h.born)<h.life);
+}
+function drawHeartPickups(ctx, gameT){
+  for(const h of heartPickups){
+    if(h.collected) continue;
+    const age = gameT-h.born;
+    const blinking = age > 4.0 && !h.big; // start blinking in the last 2s before despawn (the big heal chip never despawns)
+    const visible = !blinking || (Math.floor(h.blinkT*2)%2===0);
+    if(!visible) continue;
+    const drawY = h.y - (h.z||0);
+    if(!h.settled) drawShadow(ctx, h.x, h.y, h.big?9:6, 0.25);
+    if(h.big){
+      const cell = 4.6;
+      drawBitmap(ctx, CHIP_ROWS, {'1':PAL.gold}, h.x-4.5*cell, drawY-4.5*cell, cell);
+      drawPixelText(ctx, 'HA HA!', h.x, drawY-9, 13, PAL.outline, 'center');
+    } else {
+      drawHeart(ctx, h.x-4.5*2.5, drawY-4.5*2.5, 2.5, 1);
+    }
+  }
+}
+
+/* ---------------- particles: HA-HA bursts, sparkles, splashes, glass shards ---------------- */
+function spawnHaBurst(cx, cy, gameT){
+  for(let i=0;i<10;i++){
+    particles.push({type:'ha', x:cx+(Math.random()*160-80), y:cy+Math.random()*40, vy:-(30+Math.random()*30), born:gameT, life:1.8});
+  }
+}
+function spawnSparkleBurst(cx, cy, n, gameT){
+  for(let i=0;i<n;i++){
+    const ang = (i/n)*Math.PI*2;
+    particles.push({type:'sparkle', x:cx, y:cy, vx:Math.cos(ang)*40, vy:Math.sin(ang)*40, born:gameT, life:0.7});
+  }
+}
+function spawnGlassShards(cx, cy, gameT){
+  for(let i=0;i<10;i++){
+    const ang = Math.random()*Math.PI*2;
+    particles.push({type:'shard', x:cx, y:cy, vx:Math.cos(ang)*(60+Math.random()*90), vy:Math.sin(ang)*(60+Math.random()*90)-40, born:gameT, life:0.5});
+  }
+}
+/* Beat 4: a completed review -- 5 small gold stars rising/fading in a staggered row */
+function spawnStarRow(cx, cy, gameT){
+  for(let i=0;i<5;i++){
+    particles.push({type:'starrow', x:cx+(i-2)*14, y:cy, vy:-30-Math.random()*10, born:gameT+i*0.05, life:1.0});
+  }
+}
+function updateAndDrawParticles(ctx, dt, gameT){
+  for(const p of particles){
+    const age = gameT-p.born;
+    if(age > p.life) continue;
+    const a = 1-age/p.life;
+    if(p.type==='ha'){
+      const py = p.y + (p.vy||0)*age;
+      ctx.save(); ctx.globalAlpha=a;
+      drawPixelText(ctx, 'HA', p.x, py, 13, PAL.cream, 'center');
+      ctx.restore();
+    } else if(p.type==='sparkle'){
+      const px=p.x+p.vx*age, py=p.y+p.vy*age;
+      drawSparkle(ctx, px, py, sparkleFrameSize(age,0.3), a, PAL.gold);
+    } else if(p.type==='splash'){
+      const px=p.x+p.vx*age, py=p.y+p.vy*age+120*age*age;
+      ctx.save(); ctx.globalAlpha=a; ctx.fillStyle=p.color||PAL.napkin;
+      ctx.fillRect(Math.round(px-1),Math.round(py-1),3,3);
+      ctx.restore();
+    } else if(p.type==='shard'){
+      const px=p.x+p.vx*age, py=p.y+p.vy*age+260*age*age;
+      ctx.save(); ctx.globalAlpha=a; ctx.fillStyle='#dff0e8';
+      ctx.fillRect(Math.round(px-1),Math.round(py-1),2,2);
+      ctx.restore();
+    } else if(p.type==='starrow'){
+      if(age<0) continue; // staggered born time -- not risen yet
+      const py = p.y + (p.vy||0)*age;
+      ctx.save(); ctx.globalAlpha=a;
+      drawStarIcon(ctx, p.x-10, py-10, true, 4);
+      ctx.restore();
+    }
+  }
+  particles = particles.filter(p=> (gameT-p.born) <= p.life);
+}
+
+/* ======================================================================
+   GAME STATE
+   ====================================================================== */
+function lerp(a,b,t){ return a+(b-a)*t; }
+function clamp01(t){ return Math.max(0, Math.min(1, t)); }
+
+const ROUNDS = [
+  { lines:['I DRANK A GLASS OF RIESLING','SO NOBODY ELSE HAD TO.'] },
+  { lines:['I STAYED TILL THE SEVENTH INNING','OF A TWELVE TO ZERO GAME.'] }
+];
+/* each entry is a pre-wrapped 1-2 line bubble (array-of-arrays so a long line
+   like the baseball callback can wrap without any runtime text-measuring) */
+const CRITIQUE_LINES = [
+  ['WEAK PREMISE.'],
+  ['DERIVATIVE.'],
+  ['THE SOUP WAS LUKEWARM.'],
+  ['I’VE HEARD THIS STORY TWICE.'],
+  ['GOOD THING HE BOUGHT ALL THE','BASEBALLS AT THE GAME.']
+];
+/* wine-snob insults, cycled in order each time the chef throws a riesling.
+   Lines pre-checked clean against the tone/grep gate in SPEC-game.md's
+   acceptance checklist. */
+const WINE_INSULTS = [
+  'TOO SWEET.',
+  'OFF-VINTAGE.',
+  'GAS STATION TERROIR.',
+  'SERVED WARM. LIKE A SOUP.',
+  'A SCREW-TOP YEAR.',
+  'IT PAIRS WITH REGRET.'
+];
+let wineInsultIndex = 0;
+let playerBubble = null; // {text, born} -- small bubble over the chef's head
+
+let player = { x:PLAYER_SPAWN.x, y:PLAYER_SPAWN.y, facing:'down', walkAnimT:0, hearts:6, maxHearts:12, hasBottle:false, iframes:0, canMove:true, vx:0, vy:0 };
+let diners = DINER_DEFS.map(d=>({...d, walking:false, retired:false, bounceT:0, shakeT:0}));
+let boss = {
+  visible:false, state:'hidden', hp:6, maxHp:6, x:900, y:350, doorPopT:0,
+  napkinTimer:1.4, critiqueTimer:6, duckT:0, bubble:null, recoilT:0,
+  fakeDeathDone:false, phase2:false, fdT:0, walkX:560, walkY:248, deadT:0,
+  transforming:false, transformT:0.6, targetScale:1.8
+};
+let woman = { x:24, y:300, active:false, arrived:false };
+/* Aram (Beat 4) -- the chef's boss. state: 'idle' | 'walkin' | 'chase' | 'frozen'.
+   Reuses the same "reused fields on a shared entity" convention as everything
+   else here (x/y drive both movement and drawing). */
+let aram = { active:false, x:24, y:300, state:'idle', turnedGood:false, contactCooldown:0, facing:'right', walkAnimT:0 };
+let stats = { heartsCaptured:0, hitsTaken:0, bottlesLanded:0, tooSoon:0, reviews:0 };
+let bottlePickup = { x:BOTTLE_SPAWN.x, y:BOTTLE_SPAWN.y, active:true, respawnAt:0 };
+let lastTooSoonAt = -999;
+/* which "you lost" flavor to show on the gameover/retry screens -- set at each
+   trigger site right before enterPhase('gameover') */
+let gameOverReason = 'boss';
+
+let gameT = 0;
+let phase = 'story';
+let phaseData = {};
+let phaseElapsed = 0;
+let roundIndex = 0;
+let screenShakeUntil = 0, screenShakeMag = 0;
+let flashAlpha = 0;
+
+/* start-of-play controls hint: visible until the player has both moved and
+   pressed action at least once (or 10s, whichever first), then fades 0.5s. */
+const CONTROLS_HINT_TEXT = 'ARROWS/WASD: MOVE   SPACE: SAY IT / THROW';
+let hasMovedOnce = false, hasActionedOnce = false;
+let controlsHintAlpha = 1;
+
+function updateTypewriterAudio(tw, t, onLineDone){
+  const state = tw.getState(t);
+  for(let i=0;i<tw.lines.length;i++){
+    const prev = tw.prevRevealed[i];
+    const now = state[i];
+    if(now > prev){
+      for(let k=prev+1;k<=now;k++){ if(k%2===0 && actx) playBeep(actx.currentTime+0.001); }
+      if(now === tw.lines[i].length && prev < tw.lines[i].length){
+        if(actx) playDing(actx.currentTime+0.001);
+        if(onLineDone) onLineDone(i);
+      }
+    }
+    tw.prevRevealed[i] = now;
+  }
+  return state;
+}
+function triggerShake(mag, dur){ screenShakeUntil = gameT+dur; screenShakeMag = mag; }
+
+function enterPhase(name){
+  const prevData = phaseData;
+  phase = name; phaseElapsed = 0; phaseData = {};
+  if(name==='story'){
+    phaseData.tw = makeTypewriter(ROUNDS[roundIndex].lines, 20, 0.4);
+    // typing runs on its own clock (typeT), separate from phaseElapsed, so an
+    // early-punchline penalty can pause it (see triggerTooSoon) without
+    // disturbing anything else that might read phaseElapsed.
+    phaseData.typeT = 0;
+    phaseData.pauseUntil = -1;
+    phaseData.tooSoonPopAt = null;
+    phaseData.tooSoonBubbleAt = null;
+  } else if(name==='prompt'){
+    // keep the finished story typewriter around so the bubble (fully typed,
+    // static) can still be drawn behind the bouncing "!" prompt
+    phaseData.promptStart = gameT;
+    phaseData.tw = prevData.tw;
+  } else if(name==='breather'){
+    // nothing
+  } else if(name==='beat2_intro'){
+    diners[CRITIC_INDEX].bubbleText = 'OKAY. WE GET IT.';
+    diners[CRITIC_INDEX].bubbleShownAt = gameT;
+  } else if(name==='boss'){
+    boss.visible = true; boss.state='active'; boss.hp=6; boss.maxHp=6;
+    boss.napkinTimer=1.4; boss.critiqueTimer=6; boss.phase2=false;
+    boss.x = BOSS_DOOR.x+BOSS_DOOR.w/2; boss.y = BOSS_DOOR.y+BOSS_DOOR.h*0.6;
+    boss.transforming = false; boss.transformT = 0.6; boss.targetScale = 1.8;
+    bottlePickup.active = true;
+    drumsOn = true; harmonyOn=false; hatsSixteenths=false;
+    if(actx){ musicDir.droneOn=true; setMusicProgram(loopProgram('A'), 140); }
+    maybeShowCard('boss'); // "right after the door pop, before his first attack"
+  } else if(name==='beat3_intro'){
+    player.canMove = false;
+    woman.active = true; woman.x = 24; woman.y = LEFT_DOOR.y+LEFT_DOOR.h/2;
+  } else if(name==='beat3_revive'){
+    // he was left in 'dead' state after the real kill (drawBaseScene gates
+    // drawCritic behind state!=='dead') -- clear it here so he actually
+    // renders again for the rest of Beat 3 and for Beat 4's wander/chase.
+    // 'revived' (not 'active') on purpose: 'active'/'phase2active' are what
+    // bossIsFighting() and the HP-bar HUD check for, and neither should come
+    // back once he's out of the fight for good.
+    boss.state = 'revived';
+    spawnSparkleBurst(boss.x, boss.y, 14, gameT);
+  } else if(name==='beat3_silence'){
+    if(actx) duckDown(actx.currentTime, 0.015);
+  } else if(name==='beat3_finale'){
+    triggerShake(8, 0.4);
+    flashAlpha = 0.85;
+    // everyone laughs at once -- diners, the woman, and the boss
+    for(const d of diners){ if(!d.walking && !d.retired) d.bounceT = 0.001; }
+    spawnHaBurst(diners[0].x, diners[0].y-40, gameT);
+    spawnHaBurst(diners[2].x, diners[2].y-40, gameT);
+    spawnHaBurst(diners[3].x, diners[3].y-40, gameT);
+    spawnHaBurst(woman.x, woman.y-40, gameT);
+    spawnHaBurst(boss.x, boss.y-40, gameT);
+    if(actx){
+      const now = actx.currentTime;
+      playSlamBoom(now);
+      playTwang(now);
+      playTwang(now+BEAT_DEFAULT);
+      drumsOn = true; harmonyOn = true; hatsSixteenths = false;
+      setMusicProgram(onceProgram(['B']), 118);
+      duckUp(now, 1.0);
+      if(speechWorked===true) speakForFree();
+    }
+  } else if(name==='beat4_intro'){
+    player.canMove = false;
+    aram.active = true; aram.state = 'walkin'; aram.turnedGood = false;
+    aram.x = 24; aram.y = LEFT_DOOR.y+LEFT_DOOR.h/2;
+    aram.contactCooldown = 0;
+    phaseData.stage = 0;
+    triggerShake(6, 0.3);
+    if(actx) playSlamBoom(actx.currentTime);
+  } else if(name==='beat4_chase'){
+    player.canMove = true;
+    aram.state = 'chase';
+    resetReviewers();
+    drumsOn = true; harmonyOn = true; hatsSixteenths = true;
+    if(actx){ musicDir.droneOn = false; setMusicProgram(loopProgram('B'), 140); }
+    maybeShowCard('aram');
+  } else if(name==='beat4_turngood'){
+    aram.state = 'frozen';
+    phaseData.stage = 0;
+    if(actx) duckDown(actx.currentTime);
+  } else if(name==='endcard'){
+    phaseData.rank = computeRank();
+  } else if(name==='gameover'){
+    // whole table reacts
+  } else if(name==='retrycard'){
+    // nothing
+  }
+}
+function computeRank(){
+  // jumping the punchline early caps the rank -- IMMACULATE means you never
+  // messed up the timing in either direction, not just that you dodged well.
+  if(stats.hitsTaken<=2 && stats.tooSoon===0) return 'IMMACULATE';
+  if(stats.hitsTaken<=6) return 'COMIC TIMING';
+  return 'GUY WHO RUINS DINNERS';
+}
+
+/* ---------------- early punchline penalty ("story" phase only) ---------------- */
+function triggerTooSoon(){
+  if(gameT - lastTooSoonAt < 1.0) return; // cooldown so mashing can't melt hearts
+  lastTooSoonAt = gameT;
+  stats.tooSoon++;
+  player.hearts = Math.max(1, player.hearts-1); // half heart, floored so Beat 1 can't be a game over
+  triggerShake(3, 0.2);
+  if(actx) playGroan(actx.currentTime);
+  phaseData.tooSoonPopAt = gameT;
+  phaseData.tooSoonBubbleAt = gameT;
+  phaseData.pauseUntil = gameT + 0.8; // the typewriter (typeT) freezes until this passes
+  for(const d of diners){ if(!d.walking && !d.retired) d.shakeT = 0.001; }
+}
+
+/* ---------------- punchline trigger (Beat 1) ---------------- */
+function triggerForFree(){
+  const perfect = (gameT - phaseData.promptStart) <= 1.2;
+  triggerShake(8, 0.4);
+  drumsOn = true;
+  if(actx){
+    const now = actx.currentTime;
+    playSlamBoom(now);
+    playTwang(now);
+    playTwang(now+BEAT_DEFAULT*0.6);
+    duckUp(now, 1.0);
+  }
+  speakForFree();
+  // everyone at the table visibly laughs -- each diner bounces AND gets their
+  // own HA-HA burst from their own seat, not one burst from the table center
+  for(const d of diners){
+    if(!d.walking && !d.retired){
+      d.bounceT = 0.001;
+      spawnHaBurst(d.x, d.y-40, gameT);
+    }
+  }
+  const n = 6+Math.floor(Math.random()*3) + (perfect?2:0);
+  spawnHeartBurst(n, TABLE.x+TABLE.w/2, TABLE.y+TABLE.h/2, gameT);
+  enterPhase('capture');
+  phaseData.slamAt = gameT;
+  phaseData.perfect = perfect;
+  if(!cardsShown.capture){
+    // let 0.4s of real scatter physics happen first, so the tutorial card
+    // freezes the laughs visibly mid-air instead of stacked at the table
+    pendingCard = CARDS.capture;
+    pendingCardAt = gameT + 0.4;
+  }
+}
+
+/* ---------------- bottle throw resolution ---------------- */
+function throwBottle(){
+  if(!player.hasBottle) return;
+  player.hasBottle = false;
+  const duration = 0.75;
+  const canDuck = !boss.phase2 && boss.hp>3;
+  const ducked = canDuck && Math.random()<0.25;
+  spawnBottleThrow(player.x, player.y-16, boss.x, boss.y, duration);
+  bottles[bottles.length-1].willHit = !ducked;
+  if(ducked){ boss.duckT = duration*0.6; if(actx) playWhoosh(actx.currentTime); }
+  // the chef can't resist a wine-snob insult on every throw -- doesn't block
+  // movement or the next throw, just a small bubble over his head
+  const line = WINE_INSULTS[wineInsultIndex % WINE_INSULTS.length];
+  wineInsultIndex++;
+  playerBubble = { text: line, born: gameT };
+  if(speechWorked===true) speakLine(line, 1.05, 0.7);
+}
+function checkBossHit(){
+  boss.hp = Math.max(0, boss.hp-1);
+  stats.bottlesLanded++;
+  boss.recoilT = 0.3;
+  if(boss.hp<=0){
+    if(!boss.fakeDeathDone){
+      boss.fakeDeathDone = true;
+      boss.hp = 1;
+      boss.state = 'fakedeath';
+      boss.fdT = 0; boss.fdJingleFired=false; boss.fdScratchFired=false;
+      boss.fdBubbleTw=null; boss.fdBubbleStage=0; boss.fdBubble2At=null; boss.fdDoneAt=null;
+      // the HP bar "shatters" -- a burst where it was sitting, right as it vanishes
+      spawnGlassShards(CW/2, 33, gameT);
+    } else {
+      boss.state = 'dead'; boss.deadT = 0;
+      spawnBigHeart(boss.x, boss.y+50, gameT);
+      drumsOn=false; harmonyOn=false; hatsSixteenths=false;
+      if(actx){ musicDir.droneOn=false; setMusicProgram(null); duckDown(actx.currentTime, 0.15); playSoftInterlude(actx.currentTime+0.3); }
+    }
+  }
+}
+
+/* ---------------- boss AI ---------------- */
+/* clamp to the same playable interior every moving-target aim point uses, so
+   a lead/cutoff prediction can never ask a napkin to target inside a wall */
+function clampToArena(x, y){
+  return {
+    x: Math.max(WALL_SIDE+13, Math.min(CW-WALL_SIDE-13, x)),
+    y: Math.max(WALL_TOP+13, Math.min(CH-13, y))
+  };
+}
+/* where the player will be `leadTime` seconds from now, assuming their
+   current input holds -- used by the LED/CUTOFF attack patterns below */
+function predictPlayerPos(leadTime){
+  return clampToArena(player.x + player.vx*leadTime, player.y + player.vy*leadTime);
+}
+/* ---- randomized attack patterns (anti-circling) ----
+   A napkin that always aims at the player's live position rewards one fixed
+   counter-strategy (hold a steady circular strafe). Every throw/volley now
+   independently rolls one of 4 read-and-react patterns instead, so no single
+   movement habit is ever safe -- see SPEC-game.md "Critic attack patterns". */
+function pickAttackPattern(phase2){
+  const table = phase2
+    ? [['led',0.30],['direct',0.20],['scatter',0.20],['cutoff',0.30]]
+    : [['led',0.35],['direct',0.30],['scatter',0.20],['cutoff',0.15]];
+  let r = Math.random(), acc = 0;
+  for(const [name,w] of table){ acc += w; if(r <= acc) return name; }
+  return table[table.length-1][0];
+}
+/* n random points scattered 60-130px (tightened to 45-95px in phase 2) around
+   the player's current position -- covers a circle path both ahead and behind */
+function scatterPoints(n, phase2){
+  const rMin = phase2 ? 45 : 60, rMax = phase2 ? 95 : 130;
+  const pts = [];
+  for(let i=0;i<n;i++){
+    const ang = Math.random()*Math.PI*2;
+    const r = rMin + Math.random()*(rMax-rMin);
+    pts.push(clampToArena(player.x+Math.cos(ang)*r, player.y+Math.sin(ang)*r));
+  }
+  return pts;
+}
+/* single aim point for the non-scatter patterns */
+function patternAimPoint(pattern, phase2){
+  const leadTime = phase2 ? 0.6 : 0.45;
+  if(pattern==='led') return predictPlayerPos(leadTime);
+  if(pattern==='cutoff') return predictPlayerPos(leadTime*2); // lands where a circler is *about* to be
+  return clampToArena(player.x, player.y); // 'direct' -- punishes stopping/reversing to bait the lead
+}
+const ATTACK_AIM_WOBBLE = 40; // small extra randomness on top of led/direct/cutoff aims
+function fireSingleNapkin(){
+  const pattern = pickAttackPattern(boss.phase2);
+  if(pattern==='scatter'){
+    const p = scatterPoints(1, boss.phase2)[0];
+    spawnNapkin(boss.x, boss.y, p.x, p.y, 0.85);
+  } else {
+    const aim = patternAimPoint(pattern, boss.phase2);
+    const tx = aim.x + (Math.random()*ATTACK_AIM_WOBBLE*2-ATTACK_AIM_WOBBLE);
+    const ty = aim.y + (Math.random()*ATTACK_AIM_WOBBLE*2-ATTACK_AIM_WOBBLE);
+    spawnNapkin(boss.x, boss.y, tx, ty, 0.85);
+  }
+  napkins[napkins.length-1].big = boss.phase2;
+}
+function fireVolley(){
+  const volley = boss.phase2 ? 5 : 3;
+  const pattern = pickAttackPattern(boss.phase2);
+  if(pattern==='scatter'){
+    for(const p of scatterPoints(volley, boss.phase2)){
+      spawnNapkin(boss.x, boss.y, p.x, p.y, 0.95);
+      napkins[napkins.length-1].big = boss.phase2;
+    }
+    return;
+  }
+  const aim = patternAimPoint(pattern, boss.phase2);
+  for(let i=0;i<volley;i++){
+    const off = (i-(volley-1)/2)*32;
+    spawnNapkin(boss.x, boss.y, aim.x+off, aim.y+(Math.random()*20-10), 0.95);
+    napkins[napkins.length-1].big = boss.phase2;
+  }
+}
+function updateBossAttacks(dt){
+  if(!bossIsFighting()) return;
+  boss.napkinTimer -= dt;
+  if(boss.napkinTimer<=0){
+    const baseInterval = boss.phase2 ? 0.9 : 1.4;
+    boss.napkinTimer = baseInterval * (0.75 + Math.random()*0.5); // +/-25% jitter -- rhythm can't be memorized
+    fireSingleNapkin();
+  }
+  boss.critiqueTimer -= dt;
+  if(boss.critiqueTimer<=0){
+    boss.critiqueTimer = 6.0 * (0.75 + Math.random()*0.5);
+    const line = CRITIQUE_LINES[Math.floor(Math.random()*CRITIQUE_LINES.length)];
+    boss.bubble = { text: line, born: gameT };
+    speakCritique(line.join(' '));
+    fireVolley();
+  }
+}
+function updateFakeDeath(dt){
+  boss.fdT += dt;
+  if(!boss.fdJingleFired){ boss.fdJingleFired=true; if(actx) playJingleStart(actx.currentTime); }
+  if(boss.fdT>=1.1 && !boss.fdScratchFired){ boss.fdScratchFired=true; if(actx) playRecordScratch(actx.currentTime); }
+  // bubble starts the instant he pops back up (same beat as the record
+  // scratch) rather than after an extra pause -- otherwise there's a stretch
+  // where he's already upright but nothing is visibly happening yet.
+  if(boss.fdT>=1.1 && !boss.fdBubbleTw){
+    boss.fdBubbleTw = makeTypewriter(['JUST KIDDING.'],18,0.4);
+    boss.fdBubbleStart = boss.fdT;
+    boss.fdBubbleStage = 1;
+  }
+  if(boss.fdBubbleStage===1){
+    const t = boss.fdT-boss.fdBubbleStart;
+    if(boss.fdBubbleTw.allDone(t) && boss.fdBubble2At==null){
+      boss.fdBubble2At = boss.fdT+0.5;
+    }
+  }
+  if(boss.fdBubble2At!=null && boss.fdT>=boss.fdBubble2At && boss.fdBubbleStage===1){
+    boss.fdBubbleStage = 2;
+    boss.fdBubbleTw = makeTypewriter(['ALSO: THE SOUP WAS COLD.'],18,0.4);
+    boss.fdBubbleStart = boss.fdT;
+  }
+  if(boss.fdBubbleStage===2){
+    const t = boss.fdT-boss.fdBubbleStart;
+    if(boss.fdBubbleTw.allDone(t) && boss.fdDoneAt==null){
+      boss.fdDoneAt = boss.fdT+0.8;
+    }
+  }
+  if(boss.fdDoneAt!=null && boss.fdT>=boss.fdDoneAt){
+    boss.state = 'phase2active';
+    boss.phase2 = true;
+    boss.hp = 4; boss.maxHp = 4;
+    boss.napkinTimer = 0.9; boss.critiqueTimer = 6;
+    boss.targetScale = 2.1; // presentation only -- hitbox/gameplay unchanged
+    harmonyOn = true; hatsSixteenths = true;
+  }
+}
+/* fold phase2active back into the same attack/duck logic as active */
+function bossIsFighting(){ return boss.state==='active' || boss.state==='phase2active'; }
+
+/* ======================================================================
+   PER-FRAME UPDATE
+   ====================================================================== */
+const PLAYER_SPEED = 220;
+const keys = Object.create(null);
+let gpAPrev = false;
+
+function getMoveVector(){
+  let dx=0, dy=0;
+  if(keys['KeyW']||keys['ArrowUp']) dy -= 1;
+  if(keys['KeyS']||keys['ArrowDown']) dy += 1;
+  if(keys['KeyA']||keys['ArrowLeft']) dx -= 1;
+  if(keys['KeyD']||keys['ArrowRight']) dx += 1;
+  if(navigator.getGamepads){
+    let pads = [];
+    try{ pads = navigator.getGamepads(); }catch(e){}
+    for(const gp of pads){
+      if(!gp) continue;
+      const ax = gp.axes[0]||0, ay = gp.axes[1]||0;
+      if(Math.abs(ax)>0.3) dx += ax>0?1:-1;
+      if(Math.abs(ay)>0.3) dy += ay>0?1:-1;
+      if(gp.buttons[12] && gp.buttons[12].pressed) dy -= 1;
+      if(gp.buttons[13] && gp.buttons[13].pressed) dy += 1;
+      if(gp.buttons[14] && gp.buttons[14].pressed) dx -= 1;
+      if(gp.buttons[15] && gp.buttons[15].pressed) dx += 1;
+    }
+  }
+  const len = Math.hypot(dx,dy);
+  if(len>1){ dx/=len; dy/=len; }
+  return {dx,dy};
+}
+function pollGamepadAction(){
+  if(!navigator.getGamepads) return;
+  let pads = [];
+  try{ pads = navigator.getGamepads(); }catch(e){ return; }
+  let pressed = false;
+  for(const gp of pads){ if(gp && gp.buttons[0] && gp.buttons[0].pressed) pressed = true; }
+  if(pressed && !gpAPrev) handleAction();
+  gpAPrev = pressed;
+}
+
+function updatePlayerMovement(dt){
+  if(!player.canMove){ player.vx = 0; player.vy = 0; return; }
+  const mv = getMoveVector();
+  if(mv.dx!==0 || mv.dy!==0){
+    hasMovedOnce = true;
+    if(Math.abs(mv.dx) > Math.abs(mv.dy)) player.facing = mv.dx>0 ? 'right' : 'left';
+    else player.facing = mv.dy>0 ? 'down' : 'up';
+    player.walkAnimT += dt;
+  } else {
+    player.walkAnimT = 0;
+  }
+  // tracked for the critic's predictive-lead aim (see predictPlayerPos) --
+  // intentionally the *requested* velocity, not a post-collision delta, so a
+  // player sliding along a wall still reads as "moving that way" for aim
+  // purposes rather than snapping to 0.
+  player.vx = mv.dx*PLAYER_SPEED;
+  player.vy = mv.dy*PLAYER_SPEED;
+  const solids = arenaSolids(diners);
+  moveAndCollide(player, mv.dx*PLAYER_SPEED*dt, mv.dy*PLAYER_SPEED*dt, solids, 13);
+  if(player.iframes>0) player.iframes = Math.max(0, player.iframes-dt);
+}
+function updateDiners(dt){
+  for(const d of diners){
+    if(d.bounceT>0){ d.bounceT += dt; if(d.bounceT>1.2) d.bounceT=0; }
+    if(d.shakeT>0){ d.shakeT += dt; if(d.shakeT>0.5) d.shakeT=0; }
+  }
+}
+function updateBoss(dt){
+  if(boss.duckT>0) boss.duckT = Math.max(0, boss.duckT-dt);
+  if(boss.recoilT>0) boss.recoilT = Math.max(0, boss.recoilT-dt);
+  if(boss.state==='fakedeath') updateFakeDeath(dt);
+  if(boss.state==='dead') boss.deadT += dt;
+  if(phase==='boss') updateBossAttacks(dt);
+}
+function damagePlayer(amount){
+  if(player.iframes>0) return;
+  player.hearts = Math.max(0, player.hearts-amount);
+  player.iframes = 0.8;
+  stats.hitsTaken++;
+  if(actx) playThud(actx.currentTime);
+}
+function resolveLandings(){
+  for(const n of napkins){
+    if(n.landed && !n.resolved){
+      n.resolved = true;
+      const d = Math.hypot(player.x-n.targetX, player.y-n.targetY);
+      if(d < (n.big?32:22)) damagePlayer(1);
+    }
+  }
+  for(const b of bottles){
+    if(b.landed && !b.resolved){
+      b.resolved = true;
+      if(actx) playGlassShatter(actx.currentTime);
+      spawnGlassShards(b.targetX, b.targetY, gameT);
+      if(b.willHit) checkBossHit();
+    }
+  }
+}
+function updateBottlePickup(){
+  if(!bottlePickup.active){
+    if(gameT >= bottlePickup.respawnAt) bottlePickup.active = true;
+    return;
+  }
+  if(!player.hasBottle){
+    const d = Math.hypot(player.x-bottlePickup.x, player.y-bottlePickup.y);
+    if(d<34){ player.hasBottle=true; bottlePickup.active=false; bottlePickup.respawnAt=gameT+2.5; }
+  }
+}
+
+/* ======================================================================
+   BEAT 4 -- ARAM (post-finale final level: chase + beg for 5-star reviews)
+   Reviewers are the *same* diners[]/woman/boss objects the rest of the game
+   already draws (repurposing their x/y directly, per the established
+   convention here) -- no parallel entity list, so every existing draw loop
+   keeps working unchanged. New fields (reviewGiven/fleeing/begging/...) are
+   just added onto them once Beat 4 starts.
+   ====================================================================== */
+function getReviewerList(){ return [diners[0], diners[2], diners[3], woman, boss]; }
+function resetReviewers(){
+  stats.reviews = 0;
+  for(const r of getReviewerList()){
+    r.reviewGiven = false;
+    r.fleeing = false;
+    r.begging = false;
+    r.beggingT = 0;
+    r.wanderTX = r.x;
+    r.wanderTY = r.y;
+  }
+}
+/* picks a random floor waypoint, retrying a few times to avoid landing inside
+   the table -- reviewers don't get full collision (a documented deviation
+   from spec, kept simple since it's cosmetic-only wandering), but this keeps
+   them from parking a waypoint dead-center on it */
+function randomWanderPoint(){
+  for(let tries=0; tries<8; tries++){
+    const x = WALL_SIDE+30 + Math.random()*(CW-2*(WALL_SIDE+30));
+    const y = WALL_TOP+30 + Math.random()*(CH-WALL_TOP-60);
+    if(!rectsOverlap(x-14,y-14,28,28, TABLE.x-20,TABLE.y-20,TABLE.w+40,TABLE.h+40)) return {x,y};
+  }
+  return {x: WALL_SIDE+40, y: CH-60};
+}
+const REVIEWER_WANDER_SPEED = 50;
+const REVIEWER_FLEE_SPEED = 130; // slower than PLAYER_SPEED (220) -- catchable
+const REVIEWER_FLEE_RADIUS = 120, REVIEWER_FLEE_RESUME_RADIUS = 160; // hysteresis
+const REVIEWER_BEG_RADIUS = 40;
+const REVIEWER_BEG_DURATION = 1.2;
+function updateReviewers(dt){
+  if(phase!=='beat4_chase') return;
+  for(const r of getReviewerList()){
+    if(r.reviewGiven) continue;
+    if(r.begging){
+      r.beggingT += dt;
+      if(r.beggingT >= REVIEWER_BEG_DURATION) completeReview(r);
+      continue;
+    }
+    const dPlayer = Math.hypot(player.x-r.x, player.y-r.y);
+    if(r.fleeing){ if(dPlayer > REVIEWER_FLEE_RESUME_RADIUS) r.fleeing = false; }
+    else if(dPlayer < REVIEWER_FLEE_RADIUS){ r.fleeing = true; }
+    let tx, ty, speed;
+    if(r.fleeing){
+      const ang = Math.atan2(r.y-player.y, r.x-player.x);
+      tx = r.x + Math.cos(ang)*40; ty = r.y + Math.sin(ang)*40;
+      speed = REVIEWER_FLEE_SPEED;
+    } else {
+      if(Math.hypot(r.wanderTX-r.x, r.wanderTY-r.y) < 8){
+        const wp = randomWanderPoint();
+        r.wanderTX = wp.x; r.wanderTY = wp.y;
+      }
+      tx = r.wanderTX; ty = r.wanderTY;
+      speed = REVIEWER_WANDER_SPEED;
+    }
+    const dx = tx-r.x, dy = ty-r.y, d = Math.hypot(dx,dy);
+    if(d>1){
+      const mx = dx/d*speed*dt, my = dy/d*speed*dt;
+      r.x = Math.max(WALL_SIDE+16, Math.min(CW-WALL_SIDE-16, r.x+mx));
+      r.y = Math.max(WALL_TOP+16, Math.min(CH-16, r.y+my));
+    }
+  }
+}
+function tryBeg(){
+  let nearest = null, nearestD = Infinity;
+  for(const r of getReviewerList()){
+    if(r.reviewGiven || r.begging) continue;
+    const d = Math.hypot(player.x-r.x, player.y-r.y);
+    if(d < REVIEWER_BEG_RADIUS && d < nearestD){ nearest = r; nearestD = d; }
+  }
+  if(!nearest) return;
+  nearest.begging = true;
+  nearest.beggingT = 0;
+  nearest.fleeing = false;
+  playerBubble = { text: 'PLEASE. FIVE STARS.', born: gameT };
+  if(speechWorked===true) speakLine('Please. Five stars.', 1.0, 0.7);
+}
+function completeReview(r){
+  r.reviewGiven = true;
+  r.begging = false;
+  stats.reviews++;
+  spawnStarRow(r.x, r.y-70, gameT);
+  if(actx) playPickupChime(actx.currentTime);
+}
+const ARAM_SPEED = PLAYER_SPEED*0.8;
+const ARAM_CONTACT_RADIUS = 36, ARAM_CONTACT_COOLDOWN = 1.0, ARAM_IFRAMES = 1.0, ARAM_KNOCKBACK = 40;
+function updateAram(dt){
+  if(!aram.active) return;
+  if(aram.contactCooldown>0) aram.contactCooldown = Math.max(0, aram.contactCooldown-dt);
+  if(aram.state==='chase'){
+    const dx = player.x-aram.x, dy = player.y-aram.y, d = Math.hypot(dx,dy);
+    if(d>1){
+      aram.facing = dx>=0 ? 'right' : 'left';
+      aram.walkAnimT += dt;
+      const mx = dx/d*ARAM_SPEED*dt, my = dy/d*ARAM_SPEED*dt;
+      aram.x = Math.max(WALL_SIDE+18, Math.min(CW-WALL_SIDE-18, aram.x+mx));
+      aram.y = Math.max(WALL_TOP+18, Math.min(CH-18, aram.y+my));
+    } else {
+      aram.walkAnimT = 0;
+    }
+    if(d < ARAM_CONTACT_RADIUS && aram.contactCooldown<=0) aramContactDamage();
+  }
+}
+/* not reusing damagePlayer() -- Aram's contact needs longer iframes (1.0s vs
+   0.8s) plus a knockback shove, since he's a persistent chaser rather than a
+   one-shot projectile landing */
+function aramContactDamage(){
+  aram.contactCooldown = ARAM_CONTACT_COOLDOWN;
+  if(player.iframes>0) return;
+  player.hearts = Math.max(0, player.hearts-1);
+  player.iframes = ARAM_IFRAMES;
+  stats.hitsTaken++;
+  if(actx) playThud(actx.currentTime);
+  const dx = player.x-aram.x, dy = player.y-aram.y, d = Math.hypot(dx,dy)||1;
+  player.x = Math.max(WALL_SIDE+13, Math.min(CW-WALL_SIDE-13, player.x + dx/d*ARAM_KNOCKBACK));
+  player.y = Math.max(WALL_TOP+13, Math.min(CH-13, player.y + dy/d*ARAM_KNOCKBACK));
+  triggerShake(4, 0.25);
+}
+
+function updatePhase(dt){
+  phaseElapsed += dt;
+  switch(phase){
+    case 'story': {
+      // typeT only advances outside a too-soon pause window, so the typewriter
+      // genuinely freezes (not just visually) and resumes where it left off
+      if(gameT >= phaseData.pauseUntil) phaseData.typeT += dt;
+      updateTypewriterAudio(phaseData.tw, phaseData.typeT);
+      if(phaseData.tw.allDone(phaseData.typeT)) enterPhase('prompt');
+      break;
+    }
+    case 'prompt': break;
+    case 'capture': {
+      updateHeartPickups(dt, gameT, player, stats);
+      if(heartPickups.length===0 && phaseElapsed>0.8) enterPhase('breather');
+      break;
+    }
+    case 'breather': {
+      if(phaseElapsed>1.0){
+        if(roundIndex===0){ roundIndex=1; enterPhase('story'); }
+        else enterPhase('beat2_intro');
+      }
+      break;
+    }
+    case 'beat2_intro': {
+      const d = diners[CRITIC_INDEX];
+      if(phaseElapsed>1.6 && phaseElapsed<=3.2){
+        d.walking = true;
+        const t = clamp01((phaseElapsed-1.6)/1.6);
+        d.x = lerp(560, boss.walkX, t);
+        d.y = lerp(248, boss.walkY, t);
+      } else if(phaseElapsed>3.2 && phaseElapsed<=3.7){
+        boss.doorPopT = clamp01((phaseElapsed-3.2)/0.5);
+        if(boss.doorPopT>=0.2 && !phaseData.popSpark){
+          phaseData.popSpark = true;
+          spawnSparkleBurst(BOSS_DOOR.x+BOSS_DOOR.w/2, BOSS_DOOR.y+BOSS_DOOR.h/2, 10, gameT);
+          if(actx) playDing(actx.currentTime);
+        }
+      } else if(phaseElapsed>3.7 && phaseElapsed<=4.3){
+        // the transformation: 0.6s of rumble while his silhouette scales up
+        // from normal diner size to full looming size
+        if(!d.retired){
+          d.retired = true;
+          boss.visible = true;
+          boss.transforming = true;
+          boss.transformT = 0;
+          triggerShake(5, 0.6);
+          if(actx) playRumble(actx.currentTime);
+        }
+        boss.transformT = phaseElapsed-3.7;
+      } else if(phaseElapsed>4.3){
+        boss.doorPopT = 1;
+        boss.transforming = false;
+        boss.transformT = 0.6;
+        enterPhase('boss');
+      }
+      break;
+    }
+    case 'boss': {
+      updateBottlePickup();
+      if(player.hearts<=0 && bossIsFighting()){ gameOverReason='boss'; enterPhase('gameover'); break; }
+      if(boss.state==='dead' && boss.deadT>2.5) enterPhase('beat3_intro');
+      break;
+    }
+    case 'beat3_intro': {
+      const t = clamp01(phaseElapsed/2.2);
+      woman.x = lerp(24, 830, t);
+      woman.y = lerp(LEFT_DOOR.y+LEFT_DOOR.h/2, 400, t);
+      if(t>=1 && !woman.arrived){
+        woman.arrived = true;
+        phaseData.tw = makeTypewriter(['EXCUSE ME...','I BROUGHT THE WAGYU.'], 15, 0.5);
+        phaseData.twStart = phaseElapsed;
+      }
+      if(woman.arrived){
+        const local = phaseElapsed-phaseData.twStart;
+        updateTypewriterAudio(phaseData.tw, local);
+        if(phaseData.tw.allDone(local) && local>2.6) enterPhase('beat3_revive');
+      }
+      break;
+    }
+    case 'beat3_revive': {
+      if(phaseElapsed>1.4) enterPhase('beat3_silence');
+      break;
+    }
+    case 'beat3_silence': {
+      if(phaseElapsed>0.9) enterPhase('beat3_finale');
+      break;
+    }
+    case 'beat3_finale': {
+      if(phaseElapsed>1.0) enterPhase('beat4_intro');
+      break;
+    }
+    case 'beat4_intro': {
+      const walkT = clamp01(phaseElapsed/1.0);
+      aram.x = lerp(24, 480, walkT);
+      aram.y = lerp(LEFT_DOOR.y+LEFT_DOOR.h/2, 300, walkT);
+      aram.walkAnimT = phaseElapsed;
+      if(walkT>=1 && phaseData.stage===0){
+        phaseData.stage = 1;
+        phaseData.bubbleTw = makeTypewriter(['A ONE-STAR GOOGLE REVIEW?!'], 18, 0.4);
+        phaseData.bubbleStart = phaseElapsed;
+      }
+      if(phaseData.stage===1){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(phaseData.bubbleTw.allDone(local) && local>0.9){
+          phaseData.stage = 2;
+          phaseData.bubbleTw = makeTypewriter(['WHO DID THIS?'], 18, 0.4);
+          phaseData.bubbleStart = phaseElapsed;
+        }
+      } else if(phaseData.stage===2){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(phaseData.bubbleTw.allDone(local) && local>0.9) enterPhase('beat4_chase');
+      }
+      break;
+    }
+    case 'beat4_chase': {
+      if(stats.reviews>=3){ enterPhase('beat4_turngood'); break; }
+      if(player.hearts<=0){ gameOverReason='beat4'; enterPhase('gameover'); break; }
+      break;
+    }
+    case 'beat4_turngood': {
+      if(phaseData.stage===0 && phaseElapsed>1.5){
+        phaseData.stage = 1;
+        aram.turnedGood = true;
+        triggerShake(5, 0.3);
+        for(const d of diners){ if(!d.walking && !d.retired) d.bounceT = 0.001; }
+        spawnHaBurst(diners[0].x, diners[0].y-40, gameT);
+        spawnHaBurst(diners[2].x, diners[2].y-40, gameT);
+        spawnHaBurst(diners[3].x, diners[3].y-40, gameT);
+        spawnHaBurst(woman.x, woman.y-40, gameT);
+        spawnHaBurst(boss.x, boss.y-40, gameT);
+        spawnSparkleBurst(aram.x, aram.y-60, 14, gameT);
+        phaseData.bubbleTw = makeTypewriter(['FIVE STARS...'], 18, 0.4);
+        phaseData.bubbleStart = phaseElapsed;
+        if(actx){
+          const now = actx.currentTime;
+          playFanfare(now);
+          duckUp(now, 1.0);
+          drumsOn = true; harmonyOn = true; hatsSixteenths = false;
+          setMusicProgram(onceProgram(['B']), 118);
+        }
+      } else if(phaseData.stage===1){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(phaseData.bubbleTw.allDone(local) && local>0.8){
+          phaseData.stage = 2;
+          phaseData.bubbleTw = makeTypewriter(['DINNER AT MY PLACE. SOMETIME.'], 18, 0.4);
+          phaseData.bubbleStart = phaseElapsed;
+        }
+      } else if(phaseData.stage===2){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(phaseData.bubbleTw.allDone(local) && local>1.0) enterPhase('freeze');
+      }
+      break;
+    }
+    case 'freeze': {
+      if(phaseElapsed>1.5) enterPhase('endcard');
+      break;
+    }
+    case 'endcard': break;
+    case 'gameover': {
+      if(phaseElapsed>1.6) enterPhase('retrycard');
+      break;
+    }
+    case 'retrycard': break;
+  }
+}
+
+function update(dt){
+  updatePlayerMovement(dt);
+  updateDiners(dt);
+  updateBoss(dt);
+  updateAram(dt);
+  updateReviewers(dt);
+  updateNapkins(dt, gameT);
+  updateBottles(dt, gameT);
+  resolveLandings();
+  updatePhase(dt);
+  if(flashAlpha>0) flashAlpha = Math.max(0, flashAlpha - 3*dt);
+  if(controlsHintAlpha>0 && ((hasMovedOnce && hasActionedOnce) || gameT>=10)){
+    controlsHintAlpha = Math.max(0, controlsHintAlpha - dt/0.5); // 0.5s fade
+  }
+  if(pendingCard && gameT>=pendingCardAt){
+    activeCard = pendingCard;
+    cardsShown[activeCard.key] = true;
+    pendingCard = null;
+    cardT = 0;
+  }
+}
+
+/* ======================================================================
+   ACTIONS
+   ====================================================================== */
+function ensureAudioStarted(){
+  if(!actx){
+    initAudio();
+    audioT0 = actx.currentTime;
+    startScheduler();
+    setMusicProgram(loopProgram('A'), 112);
+    // same user-gesture that unlocks the AudioContext also starts the real
+    // track; dispatchEvent silently no-ops the chiptune note types the
+    // instant useMp3Music flips true, so there's no double-music moment
+    initMusicTrack();
+    startMusicTrack();
+  }
+  if(actx.state==='suspended' && actx.resume) actx.resume();
+}
+function handleAction(){
+  hasActionedOnce = true;
+  ensureAudioStarted();
+  if(activeCard){ activeCard = null; return; }
+  if(phase==='prompt') triggerForFree();
+  else if(phase==='story') triggerTooSoon();
+  else if(phase==='boss' && player.hasBottle) throwBottle();
+  else if(phase==='beat4_chase') tryBeg();
+  else if(phase==='retrycard'){ if(gameOverReason==='beat4') retryBeat4(); else retryBeat2(); }
+  else if(phase==='endcard') window.location.href = '../intro/';
+}
+function retryBeat2(){
+  player.hearts = 6; player.hasBottle = false; player.canMove = true;
+  napkins = []; bottles = []; heartPickups = [];
+  bottlePickup.active = true;
+  enterPhase('boss');
+}
+function retryBeat4(){
+  player.hearts = 6; player.canMove = true;
+  napkins = []; bottles = []; heartPickups = [];
+  aram.contactCooldown = 0;
+  // cardsShown deliberately untouched -- ARAM HAS ARRIVED already shown once
+  enterPhase('beat4_chase');
+}
+
+/* ======================================================================
+   HUD + END CARD
+   ====================================================================== */
+function drawHUD(ctx){
+  const slots = player.maxHearts/2;
+  for(let i=0;i<slots;i++){
+    const unit = i*2;
+    let fill = 0;
+    if(player.hearts >= unit+2) fill = 1;
+    else if(player.hearts >= unit+1) fill = 0.5;
+    drawHeart(ctx, 16+i*28, 16, 3.0, fill);
+  }
+  if(player.hasBottle) drawBottle(ctx, 18, 50, 2.2);
+  // hidden during 'fakedeath' -- the bar "shatters" at the fake-kill hit and
+  // only reappears (with 4 segments) once phase 2 actually starts.
+  if(boss.visible && (boss.state==='active' || boss.state==='phase2active')){
+    drawReadingTextOutlined(ctx, 'THE CRITIC', CW/2, 8, 16, PAL.cream, '#000000', 'center');
+    const segs = boss.maxHp, segW=24, gap=3;
+    const totalW = segs*segW+(segs-1)*gap, bx = CW/2-totalW/2, by = 36;
+    for(let i=0;i<segs;i++){
+      ctx.fillStyle = (i<boss.hp) ? '#c9394a' : PAL.heartEmpty;
+      ctx.fillRect(bx+i*(segW+gap), by, segW, 10);
+    }
+  }
+  if(phase==='beat4_chase' || phase==='beat4_turngood'){
+    drawReadingTextOutlined(ctx, stats.reviews+'/3', CW/2, 8, 18, PAL.gold, '#000000', 'center');
+    for(let i=0;i<3;i++) drawStarIcon(ctx, CW/2-36+i*36, 34, i<stats.reviews, 5);
+  }
+}
+/* fading start-of-play hint, bottom-center. Suppressed whenever the
+   'CATCH THE LAUGHS!' hint (also bottom-center) could be showing, rather
+   than offsetting -- the capture window is short/frantic and doesn't need
+   two lines of on-screen text competing for attention. */
+function drawControlsHint(ctx){
+  if(controlsHintAlpha<=0) return;
+  ctx.save();
+  ctx.globalAlpha = controlsHintAlpha;
+  drawReadingTextOutlined(ctx, CONTROLS_HINT_TEXT, CW/2, CH-38, 16, PAL.cream, '#000000', 'center');
+  ctx.restore();
+}
+function drawExclaimPrompt(ctx, x, y, t){
+  const bob = Math.abs(Math.sin(t*6))*10;
+  drawChunkyText(ctx, '!', x, y-50-bob, 26, PAL.gold, PAL.outline, 'center');
+}
+function drawUnisonBubbles(ctx, growT){
+  const spots = [
+    {x:diners[0].x, y:diners[0].y-64},
+    {x:diners[2].x, y:diners[2].y-64},
+    {x:diners[3].x, y:diners[3].y-64},
+    {x:woman.x, y:woman.y-64},
+    {x:boss.x, y:boss.y-64}
+  ];
+  for(const s of spots) drawAutoBubble(ctx, 'FOR FREE?', s.x, s.y, 16, growT);
+}
+
+/* ======================================================================
+   BASE SCENE + PER-PHASE DRAW
+   ====================================================================== */
+function drawBaseScene(ctx){
+  // gate every tile/character-sprite draw behind assetsReady (same convention
+  // as the intro's drawScene2/3): calling rawTile/tintedSprite before the
+  // sheet has loaded is now harmless (it no longer poisons the cache with a
+  // blank canvas -- see rawTile/tintedSprite), but there's still no reason to
+  // draw a guaranteed-blank sprite for the one or two frames before load.
+  if(assetsReady) drawArena(ctx);
+  drawTableAndProps(ctx);
+  if(assetsReady){
+    for(const d of diners){
+      if(d.walking || d.retired) continue;
+      let bx = d.x, by = d.y;
+      if(d.bounceT>0) by -= Math.abs(Math.sin(d.bounceT*14))*8;
+      if(d.shakeT>0) bx += Math.sin(d.shakeT*40)*3;
+      drawDinerSprite(ctx, d.col, d.row, bx, by, d.flip);
+    }
+    const cd = diners[CRITIC_INDEX];
+    if(cd.walking && !cd.retired) drawDinerSprite(ctx, cd.col, cd.row, cd.x, cd.y, false);
+  }
+  if(bottlePickup.active) drawBottlePickupCue(ctx, gameT);
+  drawBottles(ctx);
+  drawNapkins(ctx);
+  if(boss.doorPopT>0) drawBossDoorFrame(ctx, boss.doorPopT);
+  if(assetsReady && boss.visible && boss.state!=='dead' && !(boss.duckT>0)){
+    // slumped only for the initial collapse (before the record-scratch pop-up)
+    // -- NOT for the whole fakedeath state, or he'd never visibly "pop back
+    // up" for the JUST KIDDING. bubble. Ducking is handled separately below
+    // (fully hidden, not just slumped) so a dodged throw reads unmistakably.
+    const slumped = boss.state==='fakedeath' && boss.fdT<1.1;
+    const growT = boss.transforming ? clamp01(boss.transformT/0.6) : 1;
+    drawCritic(ctx, boss.x, boss.y, gameT, slumped, growT, boss.targetScale, boss.phase2);
+  }
+  if(boss.duckT>0){
+    // he's dropped fully out of sight into the door frame -- label it so a
+    // dodged throw doesn't just read as "nothing happened". Positioned well
+    // above the door frame (not just above it) since the looming ~2.1x-scale
+    // sprite's head can reach up past y~222 when he IS visible -- this stays
+    // clear of that with margin even though the two never actually show at
+    // the same time (he's fully hidden while ducking).
+    drawPixelText(ctx, 'DUCKED!', BOSS_DOOR.x+BOSS_DOOR.w/2, 170, 16, PAL.gold, 'center');
+  }
+  if(boss.state==='dead') drawBossSagged(ctx, Math.max(0, 1-boss.deadT/1.2));
+  if(assetsReady && woman.active) drawWoman(ctx, woman.x, woman.y, gameT);
+  if(assetsReady && aram.active) drawAram(ctx, aram.x, aram.y, gameT, aram.walkAnimT, aram.turnedGood);
+  if(phase==='beat4_chase' || phase==='beat4_turngood') drawReviewerOverlays(ctx);
+  drawShadow(ctx, player.x, player.y, 10, 0.3);
+  const blinking = player.iframes>0 && Math.floor(gameT*12)%2===0;
+  if(assetsReady && !blinking) drawChef(ctx, player.x, player.y, player.facing, player.walkAnimT);
+  if(player.hasBottle) drawHeldBottle(ctx, player.x, player.y, player.facing, player.walkAnimT);
+  drawHeartPickups(ctx, gameT);
+  updateAndDrawParticles(ctx, 0, gameT);
+  // player's own speech bubble (wine-snob insults on every throw, "PLEASE.
+  // FIVE STARS." while begging) -- lives here (not in a per-phase draw fn)
+  // so it renders identically during both the boss fight and Beat 4.
+  if(playerBubble && (gameT-playerBubble.born)<1.2){
+    // clamp so it can't climb into the HP bar / review counter even if the
+    // chef hugs the top wall
+    const by = Math.max(70, player.y-64);
+    drawAutoBubble(ctx, playerBubble.text, player.x, by, 16, 1);
+  }
+}
+/* Beat 4: a small phone rect (blinking "tap") over a reviewer mid-beg, or a
+   small permanent gold star once they've handed over their five stars */
+function drawReviewerOverlays(ctx){
+  for(const r of getReviewerList()){
+    if(r.begging){
+      const tap = Math.floor(r.beggingT*6)%2===0;
+      ctx.save();
+      ctx.fillStyle = '#1c1c1c';
+      ctx.fillRect(r.x-9, r.y-96, 18, 26);
+      ctx.fillStyle = tap ? '#8fd0ff' : '#4a6a80';
+      ctx.fillRect(r.x-6, r.y-92, 12, 18);
+      ctx.restore();
+    } else if(r.reviewGiven){
+      drawStarIcon(ctx, r.x-8, r.y-98, true, 4);
+    }
+  }
+}
+
+/* `revealed` is [count0, count1] chars-per-line to show; pass null to show
+   the lines fully typed (used once the 'prompt' phase takes over from 'story'
+   -- that phase resets phaseElapsed, so the typewriter's own live reveal
+   calculation no longer applies, but the bubble should stay fully visible). */
+function drawStoryBubble(ctx, tw, revealed){
+  const d = diners[0];
+  const lp = 16, pad = 12;
+  const w0 = measureReadingText(ctx, tw.lines[0], lp), w1 = measureReadingText(ctx, tw.lines[1], lp);
+  const w = Math.max(w0,w1)+pad*2, h = 80;
+  const by = d.y-64-h-4;
+  // clamped horizontally so the widest line (round B's) can never push the
+  // bubble off either edge of the canvas
+  const bx = Math.max(6, Math.min(CW-w-6, d.x-w/2));
+  drawSpeechBubble(ctx, bx, by, w, h, 1);
+  const state = revealed || [tw.lines[0].length, tw.lines[1].length];
+  drawReadingText(ctx, tw.lines[0].slice(0,state[0]), bx+pad, by+14, lp, '#000000', 'left');
+  drawReadingText(ctx, tw.lines[1].slice(0,state[1]), bx+pad, by+42, lp, '#000000', 'left');
+}
+function drawPhaseStory(ctx){
+  drawBaseScene(ctx);
+  // during the ~0.8s reaction window right after an early punchline, swap the
+  // storyteller's bubble for "HE WASN'T DONE." instead of the (paused) story
+  // text, so the two never have to share the same anchor point at once.
+  if(phaseData.tooSoonBubbleAt!=null && gameT-phaseData.tooSoonBubbleAt<0.8){
+    drawAutoBubble(ctx, "HE WASN'T DONE.", diners[0].x, diners[0].y-64, 16, 1);
+  } else {
+    drawStoryBubble(ctx, phaseData.tw, phaseData.tw.getState(phaseData.typeT));
+  }
+  if(phaseData.tooSoonPopAt!=null){
+    const age = gameT-phaseData.tooSoonPopAt;
+    if(age<0.7){
+      ctx.save(); ctx.globalAlpha = Math.max(0,1-age/0.7);
+      drawChunkyText(ctx, 'FOR FREE?', player.x, player.y-70, 22, PAL.gold, PAL.outline, 'center');
+      ctx.restore();
+    }
+  }
+}
+function drawPhasePrompt(ctx){
+  drawBaseScene(ctx);
+  drawStoryBubble(ctx, phaseData.tw, null);
+  drawExclaimPrompt(ctx, player.x, player.y, gameT);
+}
+/* pop-in / hold / fade envelope for the capture-phase banner -- timed off
+   phaseElapsed, which already correctly freezes while the (first-capture-only)
+   tutorial card is up, so the banner effectively resumes/finishes playing out
+   right after the card is dismissed rather than burning its time hidden
+   behind the dim. Returns null once fully faded. */
+function bannerAnim(t, popIn, hold, fade){
+  if(t<0) return null;
+  if(t<popIn){ const p=t/popIn; return {alpha:p, scale:0.6+0.4*p}; }
+  if(t<popIn+hold) return {alpha:1, scale:1};
+  if(t<popIn+hold+fade){ const p=(t-popIn-hold)/fade; return {alpha:1-p, scale:1}; }
+  return null;
+}
+function drawPhaseCapture(ctx){
+  drawBaseScene(ctx);
+  if(phaseElapsed<0.7){
+    drawChunkyText(ctx, 'FOR FREE?', CW/2, KITCHEN_GLOW.y-140, 56, PAL.gold, PAL.outline, 'center');
+    if(phaseData.perfect) drawChunkyText(ctx, 'PERFECT!', CW/2, KITCHEN_GLOW.y-200, 24, PAL.cream, PAL.outline, 'center');
+  }
+  // prominent display-class banner, every capture phase (not just the first)
+  const banner = bannerAnim(phaseElapsed, 0.2, 1.2, 0.4);
+  if(banner){
+    ctx.save();
+    ctx.globalAlpha = banner.alpha;
+    ctx.translate(CW/2, CH*0.28);
+    ctx.scale(banner.scale, banner.scale);
+    drawChunkyText(ctx, 'CATCH THE LAUGHS!', 0, 0, 30, PAL.gold, PAL.outline, 'center');
+    ctx.restore();
+  }
+  if(roundIndex===0) drawReadingTextOutlined(ctx, 'CATCH THE LAUGHS!', CW/2, CH-36, 16, PAL.cream, '#000000', 'center');
+}
+function drawPhaseBreather(ctx){ drawBaseScene(ctx); }
+function drawPhaseBeat2Intro(ctx){
+  drawBaseScene(ctx);
+  if(phaseElapsed<1.6){
+    const d = diners[CRITIC_INDEX];
+    drawAutoBubble(ctx, d.bubbleText, d.x, d.y-64, 16, 1);
+  }
+}
+function drawPhaseBoss(ctx){
+  drawBaseScene(ctx);
+  if(boss.state==='fakedeath'){
+    if(boss.fdBubbleStage===1 || boss.fdBubbleStage===2){
+      const t = boss.fdT-boss.fdBubbleStart;
+      const state = boss.fdBubbleTw.getState(t);
+      drawAutoBubble(ctx, boss.fdBubbleTw.lines[0].slice(0,state[0]), boss.x, boss.y-64, 16, 1);
+    }
+  } else if(boss.bubble && (gameT-boss.bubble.born)<2.2){
+    drawAutoBubble(ctx, boss.bubble.text, boss.x, boss.y-64, 16, 1);
+  }
+  // playerBubble itself now renders from inside drawBaseScene (see there) so
+  // it also shows up during Beat 4's begging, not just the boss fight.
+}
+function drawPhaseBeat3Intro(ctx){
+  drawBaseScene(ctx);
+  if(woman.arrived){
+    const local = phaseElapsed-phaseData.twStart;
+    const state = phaseData.tw.getState(local);
+    const lp=16, pad=12;
+    const w0=measureReadingText(ctx, phaseData.tw.lines[0], lp), w1=measureReadingText(ctx, phaseData.tw.lines[1], lp);
+    const w=Math.max(w0,w1)+pad*2, h=80;
+    // clamped -- she ends up near the right wall (x~830), where a wide line
+    // at these larger sizes could otherwise push the bubble off-canvas
+    const bx=Math.max(6, Math.min(CW-w-6, woman.x-w/2)), by=woman.y-64-h-4;
+    drawSpeechBubble(ctx, bx, by, w, h, 1);
+    drawReadingText(ctx, phaseData.tw.lines[0].slice(0,state[0]), bx+pad, by+14, lp, '#000000', 'left');
+    drawReadingText(ctx, phaseData.tw.lines[1].slice(0,state[1]), bx+pad, by+42, lp, '#000000', 'left');
+  }
+}
+function drawPhaseBeat3Revive(ctx){ drawBaseScene(ctx); }
+function drawPhaseBeat3Silence(ctx){ drawBaseScene(ctx); }
+function drawPhaseBeat3Finale(ctx){
+  drawBaseScene(ctx);
+  drawUnisonBubbles(ctx, 1);
+  drawChunkyText(ctx, 'FOR FREE?', CW/2, CH/2-20, 60, PAL.gold, PAL.outline, 'center');
+}
+function drawPhaseBeat4Intro(ctx){
+  drawBaseScene(ctx);
+  if(phaseData.stage>=1 && phaseData.bubbleTw){
+    const local = phaseElapsed-phaseData.bubbleStart;
+    const state = phaseData.bubbleTw.getState(local);
+    drawAutoBubble(ctx, phaseData.bubbleTw.lines[0].slice(0,state[0]), aram.x, aram.y-130, 16, 1);
+  }
+}
+function drawPhaseBeat4Chase(ctx){ drawBaseScene(ctx); }
+function drawPhaseBeat4TurnGood(ctx){
+  drawBaseScene(ctx);
+  if(phaseData.stage>=1 && phaseData.bubbleTw){
+    const local = phaseElapsed-phaseData.bubbleStart;
+    const state = phaseData.bubbleTw.getState(local);
+    drawAutoBubble(ctx, phaseData.bubbleTw.lines[0].slice(0,state[0]), aram.x, aram.y-130, 16, 1);
+  }
+}
+/* 'freeze' is entered only from beat4_turngood now (Beat 3's finale flows
+   into beat4_intro instead of freeze -- see updatePhase) */
+function drawPhaseFreeze(ctx){ drawPhaseBeat4TurnGood(ctx); }
+function drawPhaseEndcard(ctx){
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,CW,CH);
+  drawChunkyText(ctx, 'FOR FREE?', CW/2, 130, 54, PAL.gold, PAL.outline, 'center');
+  let y = 250;
+  drawReadingText(ctx, 'LAUGHS CAUGHT: '+stats.heartsCaptured, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  drawReadingText(ctx, 'HITS TAKEN: '+stats.hitsTaken, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  drawReadingText(ctx, 'BOTTLES LANDED: '+stats.bottlesLanded, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  if(stats.tooSoon>0){
+    drawReadingText(ctx, 'EARLY PUNCHLINES: '+stats.tooSoon, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  }
+  drawReadingText(ctx, 'FIVE-STAR REVIEWS: '+stats.reviews, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  y += 14;
+  drawReadingText(ctx, phaseData.rank, CW/2, y, 24, PAL.gold, 'center');
+  y += 60;
+  if(Math.floor(phaseElapsed)%2===0) drawPixelText(ctx, 'PRESS START', CW/2, y, 16, PAL.cream, 'center');
+}
+function drawPhaseGameover(ctx){
+  drawBaseScene(ctx);
+  ctx.save(); ctx.globalAlpha=0.55; ctx.fillStyle='#000'; ctx.fillRect(0,0,CW,CH); ctx.restore();
+  const line = gameOverReason==='beat4' ? 'THE REVIEW STANDS.' : 'OKAY. WE GET IT.';
+  drawAutoBubble(ctx, line, CW/2, CH/2+20, 16, 1);
+}
+function drawPhaseRetryCard(ctx){
+  drawBaseScene(ctx);
+  ctx.save(); ctx.globalAlpha=0.55; ctx.fillStyle='#000'; ctx.fillRect(0,0,CW,CH); ctx.restore();
+  if(Math.floor(phaseElapsed*2)%2===0) drawChunkyText(ctx, 'TRY AGAIN', CW/2, CH/2, 30, PAL.gold, PAL.outline, 'center');
+  // static (non-fading) reminder under the blinking prompt
+  drawReadingTextOutlined(ctx, CONTROLS_HINT_TEXT, CW/2, CH/2+58, 16, PAL.cream, '#000000', 'center');
+}
+
+function draw(){
+  let sx=0, sy=0;
+  if(gameT < screenShakeUntil){
+    const remain = screenShakeUntil-gameT;
+    const mag = screenShakeMag*Math.max(0,remain/0.4);
+    sx = (Math.random()*2-1)*mag; sy = (Math.random()*2-1)*mag;
+  }
+  ctx.save();
+  ctx.translate(Math.round(sx), Math.round(sy));
+  ctx.fillStyle = PAL.night; ctx.fillRect(-20,-20,CW+40,CH+40);
+  switch(phase){
+    case 'story': drawPhaseStory(ctx); break;
+    case 'prompt': drawPhasePrompt(ctx); break;
+    case 'capture': drawPhaseCapture(ctx); break;
+    case 'breather': drawPhaseBreather(ctx); break;
+    case 'beat2_intro': drawPhaseBeat2Intro(ctx); break;
+    case 'boss': drawPhaseBoss(ctx); break;
+    case 'beat3_intro': drawPhaseBeat3Intro(ctx); break;
+    case 'beat3_revive': drawPhaseBeat3Revive(ctx); break;
+    case 'beat3_silence': drawPhaseBeat3Silence(ctx); break;
+    case 'beat3_finale': drawPhaseBeat3Finale(ctx); break;
+    case 'beat4_intro': drawPhaseBeat4Intro(ctx); break;
+    case 'beat4_chase': drawPhaseBeat4Chase(ctx); break;
+    case 'beat4_turngood': drawPhaseBeat4TurnGood(ctx); break;
+    case 'freeze': drawPhaseFreeze(ctx); break;
+    case 'endcard': drawPhaseEndcard(ctx); break;
+    case 'gameover': drawPhaseGameover(ctx); break;
+    case 'retrycard': drawPhaseRetryCard(ctx); break;
+  }
+  ctx.restore();
+  if(phase!=='endcard') drawHUD(ctx);
+  if(phase!=='capture' && phase!=='endcard') drawControlsHint(ctx);
+  if(flashAlpha>0){
+    ctx.save(); ctx.globalAlpha=flashAlpha; ctx.fillStyle='#fff8ea'; ctx.fillRect(0,0,CW,CH); ctx.restore();
+  }
+}
+
+/* ======================================================================
+   TUTORIAL CARDS -- Zelda-style modal explainers. Each shows once per
+   session (cardsShown persists across TRY AGAIN retries, so retries skip
+   them all -- retryBeat2()/enterPhase('boss') never clears it). While a
+   card is active, frame() skips gameT/update() entirely, which is what
+   freezes every timer and stops napkins/hearts/everything else mid-motion;
+   draw() still runs every frame (rendering the same frozen state each time)
+   so the scene behind the dim genuinely holds still rather than needing a
+   separate "paused snapshot" code path.
+   ====================================================================== */
+const CARDS = {
+  start: { key:'start', title:'DINNER IS SERVED', body:['THE GUYS TELL THEIR STORIES.','WAIT FOR THE LAST WORD...','THEN HIT SPACE.'] },
+  capture: { key:'capture', title:'CATCH THE LAUGHS!', body:['THE TABLE IS LOSING IT.','RUN AROUND AND SOAK UP EVERY HA.'] },
+  boss: { key:'boss', title:'THE CRITIC', body:['DODGE HIS REVIEWS.','STAND ON THE RIESLING TO GRAB IT.','SPACE TO THROW.'] },
+  aram: { key:'aram', title:'ARAM HAS ARRIVED', body:['THE CHEF\'S BOSS SAW A BAD REVIEW.','CHASE THE GUYS. BEG FOR FIVE STARS.','DON\'T GET CAUGHT.'] }
+};
+let activeCard = null;
+let pendingCard = null, pendingCardAt = 0;
+let cardT = 0;
+const cardsShown = {};
+function maybeShowCard(key){
+  if(cardsShown[key]) return false;
+  cardsShown[key] = true;
+  activeCard = CARDS[key];
+  cardT = 0;
+  return true;
+}
+function drawCardOverlay(ctx){
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,CW,CH);
+  ctx.restore();
+  const w = 580, h = 230;
+  const x = CW/2-w/2, y = CH/2-h/2;
+  ctx.fillStyle = PAL.cream; ctx.fillRect(x-4,y-4,w+8,h+8); // cream border
+  ctx.fillStyle = '#1a1410'; ctx.fillRect(x,y,w,h); // dark fill
+  drawChunkyText(ctx, activeCard.title, CW/2, y+24, 23, PAL.gold, PAL.outline, 'center');
+  let ly = y+82;
+  for(const line of activeCard.body){
+    drawReadingText(ctx, line, CW/2, ly, 17, PAL.cream, 'center');
+    ly += 30;
+  }
+  if(Math.floor(cardT*2)%2===0){
+    drawReadingText(ctx, 'SPACE TO CONTINUE', CW/2, y+h-36, 15, PAL.gold, 'center');
+  }
+}
+
+/* ======================================================================
+   INPUT + MAIN LOOP
+   ====================================================================== */
+window.addEventListener('keydown', (e)=>{
+  keys[e.code] = true;
+  ensureAudioStarted();
+  if(e.code==='Space' && !e.repeat){ handleAction(); e.preventDefault(); }
+});
+window.addEventListener('keyup', (e)=>{ keys[e.code] = false; });
+window.addEventListener('pointerdown', ()=>{ handleAction(); });
+window.addEventListener('load', ()=>{ try{ ensureAudioStarted(); }catch(e){} });
+
+enterPhase('story'); // populate phaseData.tw for the very first frame
+maybeShowCard('start'); // "DINNER IS SERVED" -- shown once, before round A's story
+
+let lastFrameMs = performance.now();
+function frame(nowMs){
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (nowMs-lastFrameMs)/1000);
+  lastFrameMs = nowMs;
+  pollGamepadAction();
+  if(activeCard){
+    cardT += dt; // independent clock so the card's own blink keeps animating
+  } else {
+    gameT += dt;
+    update(dt);
+  }
+  draw();
+  if(activeCard) drawCardOverlay(ctx);
+  if(actx) schedulerTick();
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
