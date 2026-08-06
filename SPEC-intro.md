@@ -67,7 +67,7 @@ glow (the ONE gradient allowed in the whole piece) casting a light cone into
 the room. In the doorway: the chef, backlit silhouette wearing a white toque
 (2-frame idle sway, 0.8 s period). Text below, typewriter:
 
-> THEY SAY A CHEF STILL WAITS IN THE DOORWAY...
+> THEY SAY CHEF GABE STILL WAITS IN THE DOORWAY...
 > LISTENING.
 
 Music: main theme A enters (square lead). A single jaw-harp twang lands

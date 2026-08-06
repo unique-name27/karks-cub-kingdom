@@ -1276,10 +1276,10 @@ function sceneLocalStart(n){
 function enterScene(n){
   sceneData = { scene:n, particles:[] };
   if(n===1){
-    sceneData.tw = makeTypewriter(['LONG AGO, IN THE KING OF KARK,','A CHEF PREPARED A FEAST FOR FOUR GUYS.','THE STORIES THEY TOLD WERE VERY ORDINARY.'],20,0.4);
+    sceneData.tw = makeTypewriter(['LONG AGO, IN THE KING OF KARK,','CHEF GABE PREPARED A FEAST FOR FOUR GUYS.','THE STORIES THEY TOLD WERE VERY ORDINARY.'],20,0.4);
     if(actx) setMusicLevel(1.0, actx.currentTime);
   } else if(n===2){
-    sceneData.tw = makeTypewriter(['THEY SAY A CHEF STILL WAITS IN THE DOORWAY...','LISTENING.'],20,0.4);
+    sceneData.tw = makeTypewriter(['THEY SAY CHEF GABE STILL WAITS IN THE DOORWAY...','LISTENING.'],20,0.4);
   } else if(n===3){
     sceneData.tw = makeTypewriter(['I DRANK A GLASS OF RIESLING','SO NOBODY ELSE HAD TO.'],20,0.4);
     sceneData.slamFired = false;

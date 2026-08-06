@@ -1,6 +1,6 @@
 # Karks Cub Kingdom
 
-A Zelda-style (SNES-era) comedy game where the player is a chef whose only
+A Zelda-style (SNES-era) comedy game where the player is Chef Gabe, whose only
 weapon is the punchline "FOR FREE?". The repo has two pieces:
 
 - `intro/` — a self-running, skippable ~50-second title cinematic, built per

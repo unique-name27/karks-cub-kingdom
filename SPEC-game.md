@@ -16,7 +16,7 @@ The stories are mundane, the chef asks "FOR FREE?", that's the whole bit.
 1. Scene 1 lines are currently "...NO COIN WAS ASKED." / "NO BILL EVER CAME."
    Replace all three lines with:
    - `LONG AGO, IN THE KING OF KARK,` (verbatim inside joke -- not a typo)
-   - `A CHEF PREPARED A FEAST FOR FOUR GUYS.`
+   - `CHEF GABE PREPARED A FEAST FOR FOUR GUYS.`
    - `THE STORIES THEY TOLD WERE VERY ORDINARY.`
 2. Scene 4 text `IT COSTS... NOTHING.` → `IT IS EXTREMELY MARBLED.`
 3. Title screen PRESS START (and any click/key on the title) now navigates to
@@ -162,8 +162,8 @@ chef's boss, storms in (a hand-tinted ~2× diner-scale sprite, dark red/angry
 palette, simple hand-drawn angry brows over the base sprite). He walks in to
 about mid-room and delivers two sequential bubbles: `A ONE-STAR GOOGLE
 REVIEW?!` then `WHO DID THIS?`. Tutorial card (shown once, same freeze-the-
-game card system as the others): title `ARAM HAS ARRIVED` — body `THE
-CHEF'S BOSS SAW A BAD REVIEW.` / `CHASE THE GUYS. BEG FOR FIVE STARS.` /
+game card system as the others): title `ARAM HAS ARRIVED` — body `CHEF
+GABE'S BOSS SAW A BAD REVIEW.` / `CHASE THE GUYS. BEG FOR FIVE STARS.` /
 `DON'T GET CAUGHT.`
 
 **Gameplay**: Aram chases the player directly at 0.8× player speed; contact
