@@ -307,8 +307,9 @@ function makeTypewriter(lines, cps, gap){
     starts.push(acc);
     acc += lines[i].length/cps + gap;
   }
+  const doneAt = starts[starts.length-1] + lines[lines.length-1].length/cps;
   return {
-    lines, starts, cps,
+    lines, starts, cps, doneAt,
     prevRevealed: lines.map(()=>0),
     getState(t){
       const out = [];
@@ -320,7 +321,12 @@ function makeTypewriter(lines, cps, gap){
       }
       return out;
     },
-    allDone(t){ return t >= starts[starts.length-1] + lines[lines.length-1].length/cps; }
+    // exposes the exact moment typing finishes (see `doneAt` above) so callers
+    // can add a genuine post-completion READ HOLD on top, rather than
+    // comparing elapsed time to a fixed threshold that can end up smaller
+    // than the typing duration itself (which silently produces a ~0s hold --
+    // this was the root cause of dialogue feeling like it "advances too fast")
+    allDone(t){ return t >= doneAt; }
   };
 }
 function drawSpeechBubble(ctx, x, y, w, h, growT){
@@ -1088,9 +1094,9 @@ function drawCritic(ctx, x, y, poseT, slumped, growT, targetScale, phase2){
   drawGlassesGlint(ctx, 0, drawY, size, phase2, poseT);
   ctx.restore();
 }
-function drawWoman(ctx, x, y, walkT){
+function drawWoman(ctx, x, y, walkT, flip){
   const bob = Math.sin(walkT*8)*1.5;
-  drawTile(ctx, rawTile(imgDungeon,3,8), x-32, y-64+bob, 4, false);
+  drawTile(ctx, rawTile(imgDungeon,3,8), x-32, y-64+bob, 4, false, !!flip);
 }
 
 /* ---------------- Aram, the chef's boss (Beat 4) ----------------
@@ -1456,6 +1462,7 @@ function clamp01(t){ return Math.max(0, Math.min(1, t)); }
 
 const ROUNDS = [
   { lines:['I DRANK A GLASS OF RIESLING','SO NOBODY ELSE HAD TO.'] },
+  { lines:['THE BARTENDER COMPLIMENTED EVERY ONE OF OUR ORDERS.','LIKE WE WERE BRILLIANT.'] },
   { lines:['I STAYED TILL THE SEVENTH INNING','OF A TWELVE TO ZERO GAME.'] }
 ];
 /* each entry is a pre-wrapped 1-2 line bubble (array-of-arrays so a long line
@@ -1497,6 +1504,21 @@ let aram = { active:false, x:24, y:300, state:'idle', turnedGood:false, contactC
 let stats = { heartsCaptured:0, hitsTaken:0, bottlesLanded:0, tooSoon:0, reviews:0 };
 let bottlePickup = { x:BOTTLE_SPAWN.x, y:BOTTLE_SPAWN.y, active:true, respawnAt:0 };
 let lastTooSoonAt = -999;
+/* ---------------- read-time holds ----------------
+   How long a finished line of dialogue/a bubble sits on screen before the
+   game advances or clears it -- bumped up substantially (per user feedback:
+   text was advancing before a relaxed reader could finish it). Typing SPEED
+   itself is unchanged everywhere; only these post-completion holds grew. */
+const TOO_SOON_HOLD = 1.4;       // "HE WASN'T DONE." reaction bubble (was 0.8)
+const PLAYER_BUBBLE_HOLD = 2.0;  // chef's own insult/beg bubble (was 1.2)
+const CRITIQUE_BUBBLE_HOLD = 3.8; // critic's critique bubble (was 2.2)
+const GAMEOVER_HOLD = 2.7;       // gameover bubble before the retry card (was 1.6)
+const DIALOGUE_GAP = 0.9;        // pause between two sequential staged bubble lines
+const DIALOGUE_HOLD = 1.7;       // pause after the LAST staged line before the beat advances
+const BEAT3_WALK_DUR = 3.5;      // the woman's walk-in (was 2.2s)
+const BEAT3_LINE1_HOLD = 2.2;    // hold on "EXCUSE ME..."
+const BEAT3_LINE2_HOLD = 2.4;    // hold on "I BROUGHT THE WAGYU."
+const BEAT3_LINE3_HOLD = 2.6;    // hold on "CHEF GABE... YOU SAVED THE DINNER."
 /* which "you lost" flavor to show on the gameover/retry screens -- set at each
    trigger site right before enterPhase('gameover') */
 let gameOverReason = 'boss';
@@ -1567,6 +1589,7 @@ function enterPhase(name){
   } else if(name==='beat3_intro'){
     player.canMove = false;
     woman.active = true; woman.x = 24; woman.y = LEFT_DOOR.y+LEFT_DOOR.h/2;
+    phaseData.stage = 0;
   } else if(name==='beat3_revive'){
     // he was left in 'dead' state after the real kill (drawBaseScene gates
     // drawCritic behind state!=='dead') -- clear it here so he actually
@@ -1576,6 +1599,10 @@ function enterPhase(name){
     // back once he's out of the fight for good.
     boss.state = 'revived';
     spawnSparkleBurst(boss.x, boss.y, 14, gameT);
+    phaseData.stage = 0;
+    // soft (not silent) under her sincere line -- beat3_silence deepens this
+    // further into the true silence beat that follows
+    if(actx) duckDown(actx.currentTime, 0.35);
   } else if(name==='beat3_silence'){
     if(actx) duckDown(actx.currentTime, 0.015);
   } else if(name==='beat3_finale'){
@@ -1599,13 +1626,17 @@ function enterPhase(name){
       if(speechWorked===true) speakForFree();
     }
   } else if(name==='beat4_intro'){
+    // dramatic staging: music cuts to silence up front, room dims, door
+    // SLAMS a beat later (see updatePhase's 'beat4_intro' case for the
+    // slam/walk/letterbox timeline) -- Aram isn't visible until the slam.
     player.canMove = false;
-    aram.active = true; aram.state = 'walkin'; aram.turnedGood = false;
+    aram.active = false; aram.state = 'walkin'; aram.turnedGood = false;
     aram.x = 24; aram.y = LEFT_DOOR.y+LEFT_DOOR.h/2;
     aram.contactCooldown = 0;
     phaseData.stage = 0;
-    triggerShake(6, 0.3);
-    if(actx) playSlamBoom(actx.currentTime);
+    phaseData.slamFired = false;
+    phaseData.lastFootstepAt = -999;
+    if(actx) duckDown(actx.currentTime, 0.0);
   } else if(name==='beat4_chase'){
     player.canMove = true;
     aram.state = 'chase';
@@ -1617,6 +1648,44 @@ function enterPhase(name){
     aram.state = 'frozen';
     phaseData.stage = 0;
     if(actx) duckDown(actx.currentTime);
+  } else if(name==='celebration'){
+    // everyone converges loosely around the chef and celebrates for a
+    // sustained beat before the freeze/end card. Participants = the 3 still-
+    // seated diners + the woman + the (revived) critic + Aram -- same
+    // "4 guys" headcount convention as the Beat 3 finale's unison bubbles,
+    // since one of the original 4 diners literally IS the critic/boss by now.
+    player.canMove = false;
+    const participants = celebrationParticipants();
+    phaseData.participants = participants;
+    phaseData.startPositions = participants.map(p=>({x:p.x, y:p.y}));
+    const cx = player.x, cy = player.y, n = participants.length;
+    phaseData.targets = participants.map((p,i)=>{
+      const ang = (i/n)*Math.PI*2;
+      const r = 80 + (i%2)*20;
+      return {
+        x: Math.max(WALL_SIDE+20, Math.min(CW-WALL_SIDE-20, cx+Math.cos(ang)*r)),
+        y: Math.max(WALL_TOP+20, Math.min(CH-20, cy+Math.sin(ang)*r))
+      };
+    });
+    phaseData.lastHaAt = participants.map(()=> -999);
+    phaseData.confetti = spawnConfettiField(100);
+    phaseData.textPops = [
+      {at:0.2, x:CW*0.22, y:CH*0.26, px:28},
+      {at:1.3, x:CW*0.78, y:CH*0.62, px:28},
+      {at:2.4, x:CW*0.22, y:CH*0.68, px:28},
+      {at:3.4, x:CW*0.78, y:CH*0.24, px:28}
+    ];
+    phaseData.flashesAt = [1.0, 3.2];
+    phaseData.flashesFired = [false, false];
+    triggerShake(6, 0.4);
+    drumsOn = true; harmonyOn = true; hatsSixteenths = true;
+    if(actx){
+      const now = actx.currentTime;
+      duckUp(now, 1.0); // mp3 (if active) and/or chiptune both come back at full
+      playFanfare(now);
+      setMusicProgram(loopProgram('B'), 130);
+    }
+    if(speechWorked===true) speakForFree();
   } else if(name==='endcard'){
     phaseData.rank = computeRank();
   } else if(name==='gameover'){
@@ -1643,7 +1712,7 @@ function triggerTooSoon(){
   if(actx) playGroan(actx.currentTime);
   phaseData.tooSoonPopAt = gameT;
   phaseData.tooSoonBubbleAt = gameT;
-  phaseData.pauseUntil = gameT + 0.8; // the typewriter (typeT) freezes until this passes
+  phaseData.pauseUntil = gameT + TOO_SOON_HOLD; // the typewriter (typeT) freezes until this passes
   for(const d of diners){ if(!d.walking && !d.retired) d.shakeT = 0.001; }
 }
 
@@ -1707,7 +1776,7 @@ function checkBossHit(){
       boss.fakeDeathDone = true;
       boss.hp = 1;
       boss.state = 'fakedeath';
-      boss.fdT = 0; boss.fdJingleFired=false; boss.fdScratchFired=false;
+      boss.fdT = 0; boss.fdJingleFired=false; boss.fdScratchFired=false; boss.fdCheerFired=false;
       boss.fdBubbleTw=null; boss.fdBubbleStage=0; boss.fdBubble2At=null; boss.fdDoneAt=null;
       // the HP bar "shatters" -- a burst where it was sitting, right as it vanishes
       spawnGlassShards(CW/2, 33, gameT);
@@ -1814,14 +1883,27 @@ function updateBossAttacks(dt){
     fireVolley();
   }
 }
+/* how long he stays slumped before the record scratch -- stretched way out
+   (was 1.1s) so the player genuinely believes they won before the rug-pull;
+   the diners even start a small premature cheer partway through */
+const FD_SLUMP_DURATION = 3.5;
+const FD_CHEER_AT = 2.0;
 function updateFakeDeath(dt){
   boss.fdT += dt;
   if(!boss.fdJingleFired){ boss.fdJingleFired=true; if(actx) playJingleStart(actx.currentTime); }
-  if(boss.fdT>=1.1 && !boss.fdScratchFired){ boss.fdScratchFired=true; if(actx) playRecordScratch(actx.currentTime); }
+  if(boss.fdT>=FD_CHEER_AT && !boss.fdCheerFired){
+    boss.fdCheerFired = true;
+    // premature cheer -- the table thinks it's over. Smaller/no burst-heart
+    // than the real Beat 3 finale, just the visible reaction.
+    for(const d of diners){
+      if(!d.walking && !d.retired){ d.bounceT = 0.001; spawnHaBurst(d.x, d.y-40, gameT); }
+    }
+  }
+  if(boss.fdT>=FD_SLUMP_DURATION && !boss.fdScratchFired){ boss.fdScratchFired=true; if(actx) playRecordScratch(actx.currentTime); }
   // bubble starts the instant he pops back up (same beat as the record
   // scratch) rather than after an extra pause -- otherwise there's a stretch
   // where he's already upright but nothing is visibly happening yet.
-  if(boss.fdT>=1.1 && !boss.fdBubbleTw){
+  if(boss.fdT>=FD_SLUMP_DURATION && !boss.fdBubbleTw){
     boss.fdBubbleTw = makeTypewriter(['JUST KIDDING.'],18,0.4);
     boss.fdBubbleStart = boss.fdT;
     boss.fdBubbleStage = 1;
@@ -1829,7 +1911,7 @@ function updateFakeDeath(dt){
   if(boss.fdBubbleStage===1){
     const t = boss.fdT-boss.fdBubbleStart;
     if(boss.fdBubbleTw.allDone(t) && boss.fdBubble2At==null){
-      boss.fdBubble2At = boss.fdT+0.5;
+      boss.fdBubble2At = boss.fdT+DIALOGUE_GAP;
     }
   }
   if(boss.fdBubble2At!=null && boss.fdT>=boss.fdBubble2At && boss.fdBubbleStage===1){
@@ -1840,7 +1922,7 @@ function updateFakeDeath(dt){
   if(boss.fdBubbleStage===2){
     const t = boss.fdT-boss.fdBubbleStart;
     if(boss.fdBubbleTw.allDone(t) && boss.fdDoneAt==null){
-      boss.fdDoneAt = boss.fdT+0.8;
+      boss.fdDoneAt = boss.fdT+DIALOGUE_HOLD;
     }
   }
   if(boss.fdDoneAt!=null && boss.fdT>=boss.fdDoneAt){
@@ -1974,6 +2056,9 @@ function updateBottlePickup(){
    just added onto them once Beat 4 starts.
    ====================================================================== */
 function getReviewerList(){ return [diners[0], diners[2], diners[3], woman, boss]; }
+/* the win-celebration crowd: everyone who can plausibly be on their feet by
+   now -- same 5 as the reviewer list, plus Aram (now turned good) */
+function celebrationParticipants(){ return [diners[0], diners[2], diners[3], woman, boss, aram]; }
 function resetReviewers(){
   stats.reviews = 0;
   for(const r of getReviewerList()){
@@ -2058,6 +2143,41 @@ function completeReview(r){
 }
 const ARAM_SPEED = PLAYER_SPEED*0.8;
 const ARAM_CONTACT_RADIUS = 36, ARAM_CONTACT_COOLDOWN = 1.0, ARAM_IFRAMES = 1.0, ARAM_KNOCKBACK = 40;
+/* dramatic entrance staging (see updatePhase's 'beat4_intro' case) */
+const ARAM_SLAM_AT = 0.5;            // door slam fires this far into the beat
+const ARAM_WALK_START = 1.0;         // slow walk begins once the slam/letterbox settle
+const ARAM_WALK_DUR = 3.6;           // slow heavy walk (was an instant 1.0s stroll)
+const ARAM_FOOTSTEP_INTERVAL = 0.55; // thud + small shake cadence while walking
+const ARAM_BUBBLE_CPS = 10;          // slower typing for his intro lines specifically
+const ARAM_LETTERBOX_OUT_DUR = 0.5;  // final beat: bars out, lights up, music slams back in
+
+/* ---------------- win celebration (after Aram turns good, before freeze/end card) ---------------- */
+const CELEBRATION_DURATION = 5.0;
+const CELEB_BOUNCE_OFFSET = {0:0, 2:0.25, 3:0.5}; // per-diner phase offset so hops don't all sync up
+function spawnConfettiField(n){
+  const colors = [PAL.gold, PAL.cream, PAL.terracotta];
+  const arr = [];
+  for(let i=0;i<n;i++){
+    arr.push({
+      x: Math.random()*CW, y: -Math.random()*CH,
+      vy: 70+Math.random()*70, vx: (Math.random()*30-15),
+      w: 2+Math.random()*2, h: 3+Math.random()*3,
+      color: colors[i%colors.length],
+      rot: Math.random()*Math.PI, rotSpeed: (Math.random()*2-1)*3
+    });
+  }
+  return arr;
+}
+function drawConfetti(ctx, confetti){
+  for(const c of confetti){
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.rot);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(-c.w/2, -c.h/2, c.w, c.h);
+    ctx.restore();
+  }
+}
 function updateAram(dt){
   if(!aram.active) return;
   if(aram.contactCooldown>0) aram.contactCooldown = Math.max(0, aram.contactCooldown-dt);
@@ -2110,7 +2230,7 @@ function updatePhase(dt){
     }
     case 'breather': {
       if(phaseElapsed>1.0){
-        if(roundIndex===0){ roundIndex=1; enterPhase('story'); }
+        if(roundIndex < ROUNDS.length-1){ roundIndex++; enterPhase('story'); }
         else enterPhase('beat2_intro');
       }
       break;
@@ -2156,23 +2276,48 @@ function updatePhase(dt){
       break;
     }
     case 'beat3_intro': {
-      const t = clamp01(phaseElapsed/2.2);
+      // slower walk-in (was 2.2s) so her entrance actually reads as a moment,
+      // not a dash across the room
+      const t = clamp01(phaseElapsed/BEAT3_WALK_DUR);
       woman.x = lerp(24, 830, t);
       woman.y = lerp(LEFT_DOOR.y+LEFT_DOOR.h/2, 400, t);
       if(t>=1 && !woman.arrived){
         woman.arrived = true;
-        phaseData.tw = makeTypewriter(['EXCUSE ME...','I BROUGHT THE WAGYU.'], 15, 0.5);
-        phaseData.twStart = phaseElapsed;
+        phaseData.stage = 1;
+        phaseData.bubbleTw = makeTypewriter(['EXCUSE ME...'], 15, 0.5);
+        phaseData.bubbleStart = phaseElapsed;
       }
-      if(woman.arrived){
-        const local = phaseElapsed-phaseData.twStart;
-        updateTypewriterAudio(phaseData.tw, local);
-        if(phaseData.tw.allDone(local) && local>2.6) enterPhase('beat3_revive');
+      // "EXCUSE ME..." and "I BROUGHT THE WAGYU." now type and hold as two
+      // separate staged bubbles (each gets its own long read-hold) rather
+      // than sharing one bubble with almost no pause after typing finishes.
+      if(phaseData.stage===1){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(local > phaseData.bubbleTw.doneAt + BEAT3_LINE1_HOLD){
+          phaseData.stage = 2;
+          phaseData.bubbleTw = makeTypewriter(['I BROUGHT THE WAGYU.'], 15, 0.5);
+          phaseData.bubbleStart = phaseElapsed;
+        }
+      } else if(phaseData.stage===2){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(local > phaseData.bubbleTw.doneAt + BEAT3_LINE2_HOLD) enterPhase('beat3_revive');
       }
       break;
     }
     case 'beat3_revive': {
-      if(phaseElapsed>1.4) enterPhase('beat3_silence');
+      // beat, then she turns to the player and delivers one more sincere
+      // line before the silence/finale
+      if(phaseData.stage===0 && phaseElapsed>0.8){
+        phaseData.stage = 1;
+        phaseData.bubbleTw = makeTypewriter(['CHEF GABE... YOU SAVED THE DINNER.'], 14, 0.5);
+        phaseData.bubbleStart = phaseElapsed;
+      }
+      if(phaseData.stage===1){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(local > phaseData.bubbleTw.doneAt + BEAT3_LINE3_HOLD) enterPhase('beat3_silence');
+      }
       break;
     }
     case 'beat3_silence': {
@@ -2184,27 +2329,53 @@ function updatePhase(dt){
       break;
     }
     case 'beat4_intro': {
-      const walkT = clamp01(phaseElapsed/1.0);
-      aram.x = lerp(24, 480, walkT);
-      aram.y = lerp(LEFT_DOOR.y+LEFT_DOOR.h/2, 300, walkT);
-      aram.walkAnimT = phaseElapsed;
-      if(walkT>=1 && phaseData.stage===0){
-        phaseData.stage = 1;
-        phaseData.bubbleTw = makeTypewriter(['A ONE-STAR GOOGLE REVIEW?!'], 18, 0.4);
-        phaseData.bubbleStart = phaseElapsed;
+      // door SLAMS open partway into the beat -- boom + strong shake, and
+      // that's the moment he actually becomes visible
+      if(!phaseData.slamFired && phaseElapsed>=ARAM_SLAM_AT){
+        phaseData.slamFired = true;
+        aram.active = true;
+        triggerShake(9, 0.5);
+        if(actx) playSlamBoom(actx.currentTime);
       }
+      // slow, heavy walk-in with a thud + small shake per footstep
+      if(phaseElapsed>=ARAM_WALK_START && phaseElapsed<ARAM_WALK_START+ARAM_WALK_DUR){
+        const wt = clamp01((phaseElapsed-ARAM_WALK_START)/ARAM_WALK_DUR);
+        aram.x = lerp(24, 480, wt);
+        aram.y = lerp(LEFT_DOOR.y+LEFT_DOOR.h/2, 300, wt);
+        aram.walkAnimT = phaseElapsed;
+        if(phaseElapsed-phaseData.lastFootstepAt >= ARAM_FOOTSTEP_INTERVAL){
+          phaseData.lastFootstepAt = phaseElapsed;
+          triggerShake(3, 0.15);
+          if(actx) playThud(actx.currentTime);
+        }
+      } else if(phaseElapsed>=ARAM_WALK_START+ARAM_WALK_DUR){
+        aram.x = 480; aram.y = 300;
+        if(phaseData.stage===0){
+          phaseData.stage = 1;
+          phaseData.bubbleTw = makeTypewriter(['A ONE-STAR GOOGLE REVIEW?!'], ARAM_BUBBLE_CPS, 0.4);
+          phaseData.bubbleStart = phaseElapsed;
+        }
+      }
+      // bubbles type slowly (ARAM_BUBBLE_CPS) with long holds
       if(phaseData.stage===1){
         const local = phaseElapsed-phaseData.bubbleStart;
         updateTypewriterAudio(phaseData.bubbleTw, local);
-        if(phaseData.bubbleTw.allDone(local) && local>0.9){
+        if(local > phaseData.bubbleTw.doneAt + DIALOGUE_GAP){
           phaseData.stage = 2;
-          phaseData.bubbleTw = makeTypewriter(['WHO DID THIS?'], 18, 0.4);
+          phaseData.bubbleTw = makeTypewriter(['WHO DID THIS?'], ARAM_BUBBLE_CPS, 0.4);
           phaseData.bubbleStart = phaseElapsed;
         }
       } else if(phaseData.stage===2){
         const local = phaseElapsed-phaseData.bubbleStart;
         updateTypewriterAudio(phaseData.bubbleTw, local);
-        if(phaseData.bubbleTw.allDone(local) && local>0.9) enterPhase('beat4_chase');
+        if(local > phaseData.bubbleTw.doneAt + DIALOGUE_HOLD){
+          // letterbox out / lights up / music slams back in, THEN the chase
+          phaseData.stage = 3;
+          phaseData.stage3At = phaseElapsed;
+          if(actx) duckUp(actx.currentTime, 1.0);
+        }
+      } else if(phaseData.stage===3){
+        if(phaseElapsed-phaseData.stage3At > ARAM_LETTERBOX_OUT_DUR) enterPhase('beat4_chase');
       }
       break;
     }
@@ -2237,7 +2408,7 @@ function updatePhase(dt){
       } else if(phaseData.stage===1){
         const local = phaseElapsed-phaseData.bubbleStart;
         updateTypewriterAudio(phaseData.bubbleTw, local);
-        if(phaseData.bubbleTw.allDone(local) && local>0.8){
+        if(local > phaseData.bubbleTw.doneAt + DIALOGUE_GAP){
           phaseData.stage = 2;
           phaseData.bubbleTw = makeTypewriter(['DINNER AT MY PLACE. SOMETIME.'], 18, 0.4);
           phaseData.bubbleStart = phaseElapsed;
@@ -2245,8 +2416,50 @@ function updatePhase(dt){
       } else if(phaseData.stage===2){
         const local = phaseElapsed-phaseData.bubbleStart;
         updateTypewriterAudio(phaseData.bubbleTw, local);
-        if(phaseData.bubbleTw.allDone(local) && local>1.0) enterPhase('freeze');
+        if(local > phaseData.bubbleTw.doneAt + DIALOGUE_HOLD) enterPhase('celebration');
       }
+      break;
+    }
+    case 'celebration': {
+      const participants = phaseData.participants;
+      const convT = clamp01(phaseElapsed/1.2);
+      for(let i=0;i<participants.length;i++){
+        const sp = phaseData.startPositions[i], tp = phaseData.targets[i];
+        participants[i].x = lerp(sp.x, tp.x, convT);
+        participants[i].y = lerp(sp.y, tp.y, convT);
+      }
+      // keep Aram's own bob animating (his bounce is driven by walkAnimT,
+      // which normally only advances while actually chasing)
+      aram.walkAnimT += dt;
+      // continuous staggered hop for the 3 remaining seated diners (woman/
+      // boss/Aram already bob continuously off gameT/walkAnimT on their own)
+      for(const idx of [0,2,3]){
+        const d = diners[idx];
+        if(d.walking || d.retired) continue;
+        if(d.bounceT<=0) d.bounceT = 0.001 + CELEB_BOUNCE_OFFSET[idx];
+      }
+      // continuous staggered HA + occasional sparkle bursts, one cadence per participant
+      for(let i=0;i<participants.length;i++){
+        const interval = 0.6 + (i%3)*0.15;
+        if(phaseElapsed - phaseData.lastHaAt[i] >= interval){
+          phaseData.lastHaAt[i] = phaseElapsed;
+          spawnHaBurst(participants[i].x, participants[i].y-40, gameT);
+          if((i+Math.floor(phaseElapsed))%2===0) spawnSparkleBurst(participants[i].x, participants[i].y-30, 4, gameT);
+        }
+      }
+      // falling gold/cream/terracotta confetti, looping for the duration
+      for(const c of phaseData.confetti){
+        c.x += c.vx*dt; c.y += c.vy*dt; c.rot += c.rotSpeed*dt;
+        if(c.y > CH+10){ c.y = -10; c.x = Math.random()*CW; }
+      }
+      // a couple of soft gold screen flashes
+      for(let i=0;i<phaseData.flashesAt.length;i++){
+        if(!phaseData.flashesFired[i] && phaseElapsed>=phaseData.flashesAt[i]){
+          phaseData.flashesFired[i] = true;
+          flashAlpha = 0.4;
+        }
+      }
+      if(phaseElapsed>CELEBRATION_DURATION) enterPhase('freeze');
       break;
     }
     case 'freeze': {
@@ -2255,7 +2468,7 @@ function updatePhase(dt){
     }
     case 'endcard': break;
     case 'gameover': {
-      if(phaseElapsed>1.6) enterPhase('retrycard');
+      if(phaseElapsed>GAMEOVER_HOLD) enterPhase('retrycard');
       break;
     }
     case 'retrycard': break;
@@ -2426,7 +2639,11 @@ function drawBaseScene(ctx){
     drawPixelText(ctx, 'DUCKED!', BOSS_DOOR.x+BOSS_DOOR.w/2, 170, 16, PAL.gold, 'center');
   }
   if(boss.state==='dead') drawBossSagged(ctx, Math.max(0, 1-boss.deadT/1.2));
-  if(assetsReady && woman.active) drawWoman(ctx, woman.x, woman.y, gameT);
+  if(assetsReady && woman.active){
+    // she turns toward the chef for her sincere Beat 3 revival line
+    const facingPlayer = phase==='beat3_revive' && phaseData.stage>=1 && player.x < woman.x;
+    drawWoman(ctx, woman.x, woman.y, gameT, facingPlayer);
+  }
   if(assetsReady && aram.active) drawAram(ctx, aram.x, aram.y, gameT, aram.walkAnimT, aram.turnedGood);
   if(phase==='beat4_chase' || phase==='beat4_turngood') drawReviewerOverlays(ctx);
   drawShadow(ctx, player.x, player.y, 10, 0.3);
@@ -2438,7 +2655,7 @@ function drawBaseScene(ctx){
   // player's own speech bubble (wine-snob insults on every throw, "PLEASE.
   // FIVE STARS." while begging) -- lives here (not in a per-phase draw fn)
   // so it renders identically during both the boss fight and Beat 4.
-  if(playerBubble && (gameT-playerBubble.born)<1.2){
+  if(playerBubble && (gameT-playerBubble.born)<PLAYER_BUBBLE_HOLD){
     // clamp so it can't climb into the HP bar / review counter even if the
     // chef hugs the top wall
     const by = Math.max(70, player.y-64);
@@ -2483,10 +2700,10 @@ function drawStoryBubble(ctx, tw, revealed){
 }
 function drawPhaseStory(ctx){
   drawBaseScene(ctx);
-  // during the ~0.8s reaction window right after an early punchline, swap the
+  // during the reaction window right after an early punchline, swap the
   // storyteller's bubble for "HE WASN'T DONE." instead of the (paused) story
   // text, so the two never have to share the same anchor point at once.
-  if(phaseData.tooSoonBubbleAt!=null && gameT-phaseData.tooSoonBubbleAt<0.8){
+  if(phaseData.tooSoonBubbleAt!=null && gameT-phaseData.tooSoonBubbleAt<TOO_SOON_HOLD){
     drawAutoBubble(ctx, "HE WASN'T DONE.", diners[0].x, diners[0].y-64, 16, 1);
   } else {
     drawStoryBubble(ctx, phaseData.tw, phaseData.tw.getState(phaseData.typeT));
@@ -2551,7 +2768,7 @@ function drawPhaseBoss(ctx){
       const state = boss.fdBubbleTw.getState(t);
       drawAutoBubble(ctx, boss.fdBubbleTw.lines[0].slice(0,state[0]), boss.x, boss.y-64, 16, 1);
     }
-  } else if(boss.bubble && (gameT-boss.bubble.born)<2.2){
+  } else if(boss.bubble && (gameT-boss.bubble.born)<CRITIQUE_BUBBLE_HOLD){
     drawAutoBubble(ctx, boss.bubble.text, boss.x, boss.y-64, 16, 1);
   }
   // playerBubble itself now renders from inside drawBaseScene (see there) so
@@ -2559,34 +2776,64 @@ function drawPhaseBoss(ctx){
 }
 function drawPhaseBeat3Intro(ctx){
   drawBaseScene(ctx);
-  if(woman.arrived){
-    const local = phaseElapsed-phaseData.twStart;
-    const state = phaseData.tw.getState(local);
-    const lp=16, pad=12;
-    const w0=measureReadingText(ctx, phaseData.tw.lines[0], lp), w1=measureReadingText(ctx, phaseData.tw.lines[1], lp);
-    const w=Math.max(w0,w1)+pad*2, h=80;
-    // clamped -- she ends up near the right wall (x~830), where a wide line
-    // at these larger sizes could otherwise push the bubble off-canvas
-    const bx=Math.max(6, Math.min(CW-w-6, woman.x-w/2)), by=woman.y-64-h-4;
-    drawSpeechBubble(ctx, bx, by, w, h, 1);
-    drawReadingText(ctx, phaseData.tw.lines[0].slice(0,state[0]), bx+pad, by+14, lp, '#000000', 'left');
-    drawReadingText(ctx, phaseData.tw.lines[1].slice(0,state[1]), bx+pad, by+42, lp, '#000000', 'left');
+  if(phaseData.stage>=1 && phaseData.bubbleTw){
+    const local = phaseElapsed-phaseData.bubbleStart;
+    const state = phaseData.bubbleTw.getState(local);
+    drawAutoBubble(ctx, phaseData.bubbleTw.lines[0].slice(0,state[0]), woman.x, woman.y-64, 16, 1);
   }
 }
-function drawPhaseBeat3Revive(ctx){ drawBaseScene(ctx); }
+function drawPhaseBeat3Revive(ctx){
+  drawBaseScene(ctx);
+  if(phaseData.stage>=1 && phaseData.bubbleTw){
+    const local = phaseElapsed-phaseData.bubbleStart;
+    const state = phaseData.bubbleTw.getState(local);
+    drawAutoBubble(ctx, phaseData.bubbleTw.lines[0].slice(0,state[0]), woman.x, woman.y-64, 16, 1);
+  }
+}
 function drawPhaseBeat3Silence(ctx){ drawBaseScene(ctx); }
 function drawPhaseBeat3Finale(ctx){
   drawBaseScene(ctx);
   drawUnisonBubbles(ctx, 1);
   drawChunkyText(ctx, 'FOR FREE?', CW/2, CH/2-20, 60, PAL.gold, PAL.outline, 'center');
 }
+/* room darkens except a light pool at the left door, for Aram's entrance */
+function drawAramDim(ctx, alpha){
+  if(alpha<=0) return;
+  ctx.save(); ctx.globalAlpha = alpha; ctx.fillStyle = '#000'; ctx.fillRect(0,0,CW,CH); ctx.restore();
+  const cx = LEFT_DOOR.x+30, cy = LEFT_DOOR.y+LEFT_DOOR.h/2;
+  const bands = [[160,0.05],[120,0.09],[85,0.14],[55,0.22],[28,0.34]];
+  for(const [r,a] of bands){
+    ctx.save(); ctx.globalAlpha = a;
+    drawPixelCircle(ctx, cx, cy, r, '#fff3d6', 6);
+    ctx.restore();
+  }
+}
+function drawLetterbox(ctx, t){
+  if(t<=0) return;
+  const h = 70*t;
+  ctx.save(); ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,CW,h);
+  ctx.fillRect(0,CH-h,CW,h);
+  ctx.restore();
+}
 function drawPhaseBeat4Intro(ctx){
   drawBaseScene(ctx);
+  const dimT = clamp01(phaseElapsed/ARAM_SLAM_AT);
+  let dim = 0.6*dimT;
+  let letterboxT = clamp01((phaseElapsed-ARAM_SLAM_AT*0.5)/0.6);
+  if(phaseData.stage===3){
+    // final beat: letterbox slides out, lights come back up
+    const p = clamp01((phaseElapsed-phaseData.stage3At)/ARAM_LETTERBOX_OUT_DUR);
+    dim = 0.6*(1-p);
+    letterboxT = 1-p;
+  }
+  drawAramDim(ctx, dim);
   if(phaseData.stage>=1 && phaseData.bubbleTw){
     const local = phaseElapsed-phaseData.bubbleStart;
     const state = phaseData.bubbleTw.getState(local);
     drawAutoBubble(ctx, phaseData.bubbleTw.lines[0].slice(0,state[0]), aram.x, aram.y-130, 16, 1);
   }
+  drawLetterbox(ctx, letterboxT);
 }
 function drawPhaseBeat4Chase(ctx){ drawBaseScene(ctx); }
 function drawPhaseBeat4TurnGood(ctx){
@@ -2597,9 +2844,32 @@ function drawPhaseBeat4TurnGood(ctx){
     drawAutoBubble(ctx, phaseData.bubbleTw.lines[0].slice(0,state[0]), aram.x, aram.y-130, 16, 1);
   }
 }
-/* 'freeze' is entered only from beat4_turngood now (Beat 3's finale flows
-   into beat4_intro instead of freeze -- see updatePhase) */
-function drawPhaseFreeze(ctx){ drawPhaseBeat4TurnGood(ctx); }
+function drawPhaseCelebration(ctx){
+  drawBaseScene(ctx);
+  // warm lighting lift
+  ctx.save(); ctx.fillStyle = 'rgba(255,214,140,0.14)'; ctx.fillRect(0,0,CW,CH); ctx.restore();
+  drawConfetti(ctx, phaseData.confetti||[]);
+  for(const pop of (phaseData.textPops||[])){
+    const banner = bannerAnim(phaseElapsed-pop.at, 0.15, 0.35, 0.25);
+    if(banner){
+      ctx.save();
+      ctx.globalAlpha = banner.alpha;
+      ctx.translate(pop.x, pop.y);
+      ctx.scale(banner.scale, banner.scale);
+      drawChunkyText(ctx, 'FOR FREE?', 0, 0, pop.px, PAL.gold, PAL.outline, 'center');
+      ctx.restore();
+    }
+  }
+  // one final giant centered slam near the end, held into the freeze phase
+  if(phaseElapsed > CELEBRATION_DURATION-1.0){
+    drawChunkyText(ctx, 'FOR FREE?', CW/2, CH/2-20, 60, PAL.gold, PAL.outline, 'center');
+  }
+}
+/* 'freeze' is entered from the celebration now -- just holds the final slam */
+function drawPhaseFreeze(ctx){
+  drawBaseScene(ctx);
+  drawChunkyText(ctx, 'FOR FREE?', CW/2, CH/2-20, 60, PAL.gold, PAL.outline, 'center');
+}
 function drawPhaseEndcard(ctx){
   ctx.fillStyle = '#000'; ctx.fillRect(0,0,CW,CH);
   drawChunkyText(ctx, 'FOR FREE?', CW/2, 130, 54, PAL.gold, PAL.outline, 'center');
@@ -2654,6 +2924,7 @@ function draw(){
     case 'beat4_intro': drawPhaseBeat4Intro(ctx); break;
     case 'beat4_chase': drawPhaseBeat4Chase(ctx); break;
     case 'beat4_turngood': drawPhaseBeat4TurnGood(ctx); break;
+    case 'celebration': drawPhaseCelebration(ctx); break;
     case 'freeze': drawPhaseFreeze(ctx); break;
     case 'endcard': drawPhaseEndcard(ctx); break;
     case 'gameover': drawPhaseGameover(ctx); break;
