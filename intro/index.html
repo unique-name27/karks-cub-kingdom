@@ -1238,15 +1238,15 @@ function drawScene5(ctx, localT, se){
   drawRibbon(ctx, CW/2, 335, 220, 40);
   drawPixelText(ctx, 'FOR FREE?', CW/2, 322, 16, PAL.cream, 'center');
   const blinkOn = Math.floor(localT)%2===0;
-  if(blinkOn) drawPixelText(ctx, 'PRESS START', CW/2, 402, 18, PAL.cream, 'center');
-  drawReadingTextOutlined(ctx, 'ARROWS / WASD -- MOVE      SPACE -- SAY IT / THROW', CW/2, 440, 15, PAL.cream, '#000000', 'center');
-  drawReadingTextOutlined(ctx, 'GAMEPAD WORKS TOO', CW/2, 476, 14, PAL.cream, '#000000', 'center');
-  drawReadingTextOutlined(ctx, 'A DINNER PARTY LEGEND · KENNEY ASSETS · CC0', CW/2, 510, 9, PAL.cream, '#000000', 'center');
+  if(blinkOn) drawReadingTextOutlined(ctx, 'PRESS START', CW/2, 404, 26, PAL.cream, '#000000', 'center');
+  drawReadingTextOutlined(ctx, 'ARROWS / WASD -- MOVE      SPACE -- SAY IT / THROW', CW/2, 444, 17, PAL.cream, '#000000', 'center');
+  drawReadingTextOutlined(ctx, 'GAMEPAD WORKS TOO', CW/2, 478, 15, PAL.cream, '#000000', 'center');
+  drawReadingTextOutlined(ctx, 'A DINNER PARTY LEGEND · KENNEY ASSETS · CC0', CW/2, 512, 12, PAL.cream, '#000000', 'center');
 }
 function drawBoot(nowMs){
   ctx.fillStyle = '#000'; ctx.fillRect(0,0,CW,CH);
   const on = Math.floor(nowMs/500)%2===0;
-  if(on) drawPixelText(ctx, 'PRESS ANY BUTTON', CW/2, CH/2-8, 20, PAL.cream, 'center');
+  if(on) drawReadingTextOutlined(ctx, 'PRESS ANY BUTTON', CW/2, CH/2-8, 28, PAL.cream, '#000000', 'center');
 }
 
 /* ======================================================================
@@ -1276,7 +1276,7 @@ function sceneLocalStart(n){
 function enterScene(n){
   sceneData = { scene:n, particles:[] };
   if(n===1){
-    sceneData.tw = makeTypewriter(['LONG AGO, IN THE KING OF KARK,','CHEF GABE PREPARED A FEAST FOR FOUR GUYS.','THE STORIES THEY TOLD WERE VERY ORDINARY.'],20,0.4);
+    sceneData.tw = makeTypewriter(['LONG AGO, IN THE KINGDOM OF KARK,','CHEF GABE PREPARED A FEAST FOR FOUR GUYS.','THE STORIES THEY TOLD WERE VERY ORDINARY.'],20,0.4);
     if(actx) setMusicLevel(1.0, actx.currentTime);
   } else if(n===2){
     sceneData.tw = makeTypewriter(['THEY SAY CHEF GABE STILL WAITS IN THE DOORWAY...','LISTENING.'],20,0.4);

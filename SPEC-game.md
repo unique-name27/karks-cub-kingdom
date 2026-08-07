@@ -15,7 +15,7 @@ The stories are mundane, the chef asks "FOR FREE?", that's the whole bit.
 
 1. Scene 1 lines are currently "...NO COIN WAS ASKED." / "NO BILL EVER CAME."
    Replace all three lines with:
-   - `LONG AGO, IN THE KING OF KARK,` (verbatim inside joke -- not a typo)
+   - `LONG AGO, IN THE KINGDOM OF KARK,`
    - `CHEF GABE PREPARED A FEAST FOR FOUR GUYS.`
    - `THE STORIES THEY TOLD WERE VERY ORDINARY.`
 2. Scene 4 text `IT COSTS... NOTHING.` → `IT IS EXTREMELY MARBLED.`
