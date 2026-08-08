@@ -238,6 +238,56 @@ since none of those go through the scheduler. If the file fails to load or
 chiptune system — this must never result in silence. Playback starts on the
 same user-gesture that already unlocks the AudioContext today.
 
+### Hard mode — "Second Seating"
+
+Unlockable, offered after beating the game once, genuinely losable.
+
+**Unlock + entry**:
+- Any win (reaching the end card) sets `localStorage['kck_beaten']='1'`. The
+  end card additionally shows `HARD MODE UNLOCKED` / `SECOND SEATING AWAITS
+  AT THE START` big, the very first time it flips on; on every later win it's
+  just a small corner note instead of retaking the card.
+- On page load, if `kck_beaten` is set, a mode-select card shows **before**
+  the `DINNER IS SERVED` tutorial card: title `CHOOSE YOUR SEATING`, two rows
+  `FIRST SEATING -- A NICE DINNER` / `SECOND SEATING -- MUCH HARDER. YOU CAN
+  LOSE.`. Arrow keys/WASD move the highlight (default: FIRST SEATING), Space
+  confirms (gamepad d-pad + A too). Without the flag, boot is unchanged.
+  If `kck_hard_cleared` is set, a small gold star shows next to SECOND
+  SEATING in this card.
+- A single `hardMode` boolean, decided once at mode-select and never changed
+  mid-run. Every difficulty-sensitive constant resolves through a `DIFF`
+  table (`D(key)` picks `.normal` or `.hard`) instead of being a bare
+  literal — every `.normal` value is exactly the old literal it replaced, so
+  normal mode is guaranteed byte-identical to its pre-hard-mode behavior.
+
+**Hard-mode ("Second Seating") changes**:
+- Player: heart cap 8 half-units (4 laugh chips) instead of 12; still starts
+  at 6 halves.
+- Beat 1: story typing ~30% faster (20 → 26 cps); the PERFECT window shrinks
+  1.2s → 0.6s; an early press costs a FULL heart (2 halves) with **no
+  floor** (normal mode floors at 1 half so Beat 1 can never be fatal; hard
+  mode has no floor, so three early blurts can and do end the run —
+  `OKAY. WE GET IT.` game over); the laugh scatter drops ~40% fewer tokens
+  and they despawn in 4s instead of 6s.
+- Beat 2 (the critic): 8 HP (phase 2 returns at 6, was 4); napkin interval
+  1.0s (0.65s in phase 2, was 1.4/0.9); volleys of 4 (6 in phase 2, was 3/5);
+  napkin damage is a full heart (2 halves, was 1); duck chance is 35% at
+  **all** HP levels/phases (normal mode only allows ducking above 3 HP and
+  never in phase 2); LED/CUTOFF lead-prediction times run 30% longer.
+- Beat 3: unchanged — it's a cinematic, not a combat beat.
+- Beat 4 (Aram): his speed is 0.95× the player's (was 0.8×); contact damage
+  is a full heart (2 halves, was 1); needs 4 of the 5 reviewers instead of 3;
+  begging takes 1.8s instead of 1.2s (longer exposure while stationary);
+  reviewers flee at a higher speed and a larger detection radius.
+- **Losing is real**: in hard mode there is no mid-beat retry. Any game over
+  (a fatal early press in Beat 1, the boss fight, or Aram's chase) skips the
+  usual dimmed-bubble-then-`TRY AGAIN` flow and goes straight to a lose card:
+  big `THE DINNER IS RUINED.`, the run's full stat block, and a blinking
+  `PRESS START` that returns to the title (`../intro/`) — the whole run
+  restarts from scratch, exactly like a fresh page load.
+- **Hard-mode win**: the end card shows an extra gold line
+  `SECOND SEATING CLEARED` and sets `localStorage['kck_hard_cleared']='1'`.
+
 ### Acceptance checklist
 
 - [ ] No text anywhere mentions cost/money/bills/"nothing" (grep the file for COIN, BILL, COST, NOTHING, FREE — only "FOR FREE?" may match FREE)
@@ -250,4 +300,5 @@ same user-gesture that already unlocks the AudioContext today.
 - [ ] Wagyu revive → unison FOR FREE? → Aram's chase/beg/turn-good → end card with stats, reviews, and rank
 - [ ] Game over path works and TRY AGAIN restarts the beat it failed in (Beat 2 or Beat 4)
 - [ ] Real mp3 soundtrack plays through musicGain with ducking intact, chiptune SFX unaffected, automatic silent-safe fallback if the track can't load
+- [ ] Hard mode: unlocks on any win, mode-select card gates it correctly, every DIFF constant resolves to its normal value when hardMode is false (byte-identical to pre-hard-mode behavior) and its hard value when true, losing in hard mode always goes to the lose card (never the retry card), hard win sets kck_hard_cleared
 - [ ] Intro edits applied (new Scene 1 lines, marbled line, PRESS START → ../game/)

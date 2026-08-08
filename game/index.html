@@ -1329,7 +1329,7 @@ function spawnHeartBurst(n, cx, cy, gameT){
     heartPickups.push({
       x:cx, y:cy, fromX:cx, fromY:cy, targetX:target.x, targetY:target.y,
       t:0, duration, z:0, vz:0.5*GRAVITY*duration,
-      settled:false, born:gameT, life:6.0, collected:false, blinkT:Math.random()*Math.PI*2
+      settled:false, born:gameT, life:D('heartLife'), collected:false, blinkT:Math.random()*Math.PI*2
     });
   }
 }
@@ -1520,6 +1520,63 @@ const BEAT3_LINE3_HOLD = 2.6;    // hold on "CHEF GABE... YOU SAVED THE DINNER."
    trigger site right before enterPhase('gameover') */
 let gameOverReason = 'boss';
 
+/* ======================================================================
+   HARD MODE -- "SECOND SEATING" (unlockable after any win)
+   `hardMode` is decided once at the mode-select card (see modeSelectPending
+   below) and never changes mid-run. Every difficulty-sensitive constant
+   resolves through D(key) rather than being a bare literal, so normal mode
+   is guaranteed byte-identical to its old behavior: every 'normal' value
+   below is exactly the literal it replaces.
+   ====================================================================== */
+let hardMode = false;
+const DIFF = {
+  maxHearts:          { normal:12,   hard:8 },
+  storyCps:           { normal:20,   hard:26 },   // ~30% faster typing
+  perfectWindow:       { normal:1.2,  hard:0.6 },
+  tooSoonDamage:       { normal:1,    hard:2 },    // half-heart-units
+  heartBurstMul:       { normal:1.0,  hard:0.6 },  // ~40% fewer laugh tokens
+  heartLife:           { normal:6.0,  hard:4.0 },
+  bossMaxHp:           { normal:6,    hard:8 },
+  bossPhase2Hp:        { normal:4,    hard:6 },
+  napkinInterval:      { normal:1.4,  hard:1.0 },
+  napkinIntervalP2:    { normal:0.9,  hard:0.65 },
+  volleyCount:         { normal:3,    hard:4 },
+  volleyCountP2:       { normal:5,    hard:6 },
+  napkinDamage:        { normal:1,    hard:2 },
+  duckChance:          { normal:0.25, hard:0.35 },
+  leadTimeMul:         { normal:1.0,  hard:1.3 },
+  aramSpeedMul:        { normal:0.8,  hard:0.95 },
+  aramContactDamage:   { normal:1,    hard:2 },
+  reviewsNeeded:       { normal:3,    hard:4 },
+  begDuration:         { normal:1.2,  hard:1.8 },
+  reviewerFleeSpeed:   { normal:130,  hard:170 },
+  reviewerFleeRadius:  { normal:120,  hard:160 }
+};
+function D(key){ return DIFF[key][hardMode ? 'hard' : 'normal']; }
+
+/* mode-select card (shown at boot only if the player has beaten the game
+   before) + localStorage flags, all feature-detected/try-caught since
+   localStorage can throw (private browsing, disabled storage, etc.) */
+let modeSelectPending = false;
+let modeSelectIndex = 0; // 0 = FIRST SEATING (normal), 1 = SECOND SEATING (hard)
+let hasBeatenBefore = false, hardCleared = false;
+try{ hasBeatenBefore = window.localStorage && localStorage.getItem('kck_beaten')==='1'; }catch(e){}
+try{ hardCleared = window.localStorage && localStorage.getItem('kck_hard_cleared')==='1'; }catch(e){}
+function setLocalFlag(key){ try{ if(window.localStorage) localStorage.setItem(key,'1'); }catch(e){} }
+function confirmModeSelect(){
+  hardMode = (modeSelectIndex===1);
+  if(hardMode){
+    player.maxHearts = D('maxHearts');
+    // the very first enterPhase('story') call (at script load, before this
+    // choice existed) built its typewriter at normal-mode cps -- rebuild it
+    // now that hardMode is actually known. Safe/lossless: update()/gameT
+    // were frozen the whole time the mode-select card was up.
+    enterPhase('story');
+  }
+  modeSelectPending = false;
+  maybeShowCard('start');
+}
+
 let gameT = 0;
 let phase = 'story';
 let phaseData = {};
@@ -1556,7 +1613,7 @@ function enterPhase(name){
   const prevData = phaseData;
   phase = name; phaseElapsed = 0; phaseData = {};
   if(name==='story'){
-    phaseData.tw = makeTypewriter(ROUNDS[roundIndex].lines, 20, 0.4);
+    phaseData.tw = makeTypewriter(ROUNDS[roundIndex].lines, D('storyCps'), 0.4);
     // typing runs on its own clock (typeT), separate from phaseElapsed, so an
     // early-punchline penalty can pause it (see triggerTooSoon) without
     // disturbing anything else that might read phaseElapsed.
@@ -1575,8 +1632,8 @@ function enterPhase(name){
     diners[CRITIC_INDEX].bubbleText = 'OKAY. WE GET IT.';
     diners[CRITIC_INDEX].bubbleShownAt = gameT;
   } else if(name==='boss'){
-    boss.visible = true; boss.state='active'; boss.hp=6; boss.maxHp=6;
-    boss.napkinTimer=1.4; boss.critiqueTimer=6; boss.phase2=false;
+    boss.visible = true; boss.state='active'; boss.hp=D('bossMaxHp'); boss.maxHp=D('bossMaxHp');
+    boss.napkinTimer=D('napkinInterval'); boss.critiqueTimer=6; boss.phase2=false;
     boss.x = BOSS_DOOR.x+BOSS_DOOR.w/2; boss.y = BOSS_DOOR.y+BOSS_DOOR.h*0.6;
     boss.transforming = false; boss.transformT = 0.6; boss.targetScale = 1.8;
     bottlePickup.active = true;
@@ -1685,6 +1742,16 @@ function enterPhase(name){
     if(speechWorked===true) speakForFree();
   } else if(name==='endcard'){
     phaseData.rank = computeRank();
+    // any win unlocks hard mode ("SECOND SEATING") -- only shown big the
+    // very first time it flips on; later wins just get the small corner note
+    phaseData.wasBeatenBefore = hasBeatenBefore;
+    setLocalFlag('kck_beaten');
+    hasBeatenBefore = true;
+    if(hardMode){
+      phaseData.hardCleared = true;
+      setLocalFlag('kck_hard_cleared');
+      hardCleared = true;
+    }
   } else if(name==='gameover'){
     // whole table reacts
   } else if(name==='retrycard'){
@@ -1704,18 +1771,26 @@ function triggerTooSoon(){
   if(gameT - lastTooSoonAt < 1.0) return; // cooldown so mashing can't melt hearts
   lastTooSoonAt = gameT;
   stats.tooSoon++;
-  player.hearts = Math.max(1, player.hearts-1); // half heart, floored so Beat 1 can't be a game over
+  // normal mode floors at 1 half-heart -- Beat 1 can never be a game over.
+  // hard mode costs a full heart with NO floor -- three early blurts can and
+  // should end the run.
+  const dmg = D('tooSoonDamage');
+  player.hearts = hardMode ? Math.max(0, player.hearts-dmg) : Math.max(1, player.hearts-dmg);
   triggerShake(3, 0.2);
   if(actx) playGroan(actx.currentTime);
   phaseData.tooSoonPopAt = gameT;
   phaseData.tooSoonBubbleAt = gameT;
   phaseData.pauseUntil = gameT + TOO_SOON_HOLD; // the typewriter (typeT) freezes until this passes
   for(const d of diners){ if(!d.walking && !d.retired) d.shakeT = 0.001; }
+  if(hardMode && player.hearts<=0){
+    gameOverReason = 'beat1';
+    enterPhase('gameover');
+  }
 }
 
 /* ---------------- punchline trigger (Beat 1) ---------------- */
 function triggerForFree(){
-  const perfect = (gameT - phaseData.promptStart) <= 1.2;
+  const perfect = (gameT - phaseData.promptStart) <= D('perfectWindow');
   triggerShake(8, 0.4);
   drumsOn = true;
   if(actx){
@@ -1734,7 +1809,8 @@ function triggerForFree(){
       spawnHaBurst(d.x, d.y-40, gameT);
     }
   }
-  const n = 6+Math.floor(Math.random()*3) + (perfect?2:0);
+  const baseN = 6+Math.floor(Math.random()*3) + (perfect?2:0);
+  const n = Math.max(2, Math.round(baseN * D('heartBurstMul'))); // hard mode: ~40% fewer tokens
   spawnHeartBurst(n, TABLE.x+TABLE.w/2, TABLE.y+TABLE.h/2, gameT);
   enterPhase('capture');
   phaseData.slamAt = gameT;
@@ -1752,8 +1828,10 @@ function throwBottle(){
   if(!player.hasBottle) return;
   player.hasBottle = false;
   const duration = 0.75;
-  const canDuck = !boss.phase2 && boss.hp>3;
-  const ducked = canDuck && Math.random()<0.25;
+  // hard mode: duck chance applies at ALL hp levels/phases (no gate);
+  // normal mode keeps the original gate (never phase 2, only above 3 hp)
+  const canDuck = hardMode ? true : (!boss.phase2 && boss.hp>3);
+  const ducked = canDuck && Math.random()<D('duckChance');
   spawnBottleThrow(player.x, player.y-16, boss.x, boss.y, duration);
   bottles[bottles.length-1].willHit = !ducked;
   if(ducked){
@@ -1836,7 +1914,7 @@ function scatterPoints(n, phase2){
 }
 /* single aim point for the non-scatter patterns */
 function patternAimPoint(pattern, phase2){
-  const leadTime = phase2 ? 0.6 : 0.45;
+  const leadTime = (phase2 ? 0.6 : 0.45) * D('leadTimeMul'); // hard mode: leads +30% harder
   if(pattern==='led') return predictPlayerPos(leadTime);
   if(pattern==='cutoff') return predictPlayerPos(leadTime*2); // lands where a circler is *about* to be
   return clampToArena(player.x, player.y); // 'direct' -- punishes stopping/reversing to bait the lead
@@ -1856,7 +1934,7 @@ function fireSingleNapkin(){
   napkins[napkins.length-1].big = boss.phase2;
 }
 function fireVolley(){
-  const volley = boss.phase2 ? 5 : 3;
+  const volley = boss.phase2 ? D('volleyCountP2') : D('volleyCount');
   const pattern = pickAttackPattern(boss.phase2);
   if(pattern==='scatter'){
     for(const p of scatterPoints(volley, boss.phase2)){
@@ -1876,7 +1954,7 @@ function updateBossAttacks(dt){
   if(!bossIsFighting()) return;
   boss.napkinTimer -= dt;
   if(boss.napkinTimer<=0){
-    const baseInterval = boss.phase2 ? 0.9 : 1.4;
+    const baseInterval = boss.phase2 ? D('napkinIntervalP2') : D('napkinInterval');
     boss.napkinTimer = baseInterval * (0.75 + Math.random()*0.5); // +/-25% jitter -- rhythm can't be memorized
     fireSingleNapkin();
   }
@@ -1934,8 +2012,8 @@ function updateFakeDeath(dt){
   if(boss.fdDoneAt!=null && boss.fdT>=boss.fdDoneAt){
     boss.state = 'phase2active';
     boss.phase2 = true;
-    boss.hp = 4; boss.maxHp = 4;
-    boss.napkinTimer = 0.9; boss.critiqueTimer = 6;
+    boss.hp = D('bossPhase2Hp'); boss.maxHp = D('bossPhase2Hp');
+    boss.napkinTimer = D('napkinIntervalP2'); boss.critiqueTimer = 6;
     boss.targetScale = 2.1; // presentation only -- hitbox/gameplay unchanged
     harmonyOn = true; hatsSixteenths = true;
   }
@@ -1948,7 +2026,7 @@ function bossIsFighting(){ return boss.state==='active' || boss.state==='phase2a
    ====================================================================== */
 const PLAYER_SPEED = 220;
 const keys = Object.create(null);
-let gpAPrev = false;
+let gpAPrev = false, gpDpadPrev = false;
 
 function getMoveVector(){
   let dx=0, dy=0;
@@ -1978,10 +2056,22 @@ function pollGamepadAction(){
   if(!navigator.getGamepads) return;
   let pads = [];
   try{ pads = navigator.getGamepads(); }catch(e){ return; }
-  let pressed = false;
-  for(const gp of pads){ if(gp && gp.buttons[0] && gp.buttons[0].pressed) pressed = true; }
+  let pressed = false, dpad = false;
+  for(const gp of pads){
+    if(!gp) continue;
+    if(gp.buttons[0] && gp.buttons[0].pressed) pressed = true;
+    if((gp.buttons[12]&&gp.buttons[12].pressed) || (gp.buttons[13]&&gp.buttons[13].pressed) ||
+       (gp.buttons[14]&&gp.buttons[14].pressed) || (gp.buttons[15]&&gp.buttons[15].pressed)) dpad = true;
+  }
+  if(modeSelectPending){
+    if(dpad && !gpDpadPrev){ modeSelectIndex = 1-modeSelectIndex; if(actx) playBeep(actx.currentTime); }
+    if(pressed && !gpAPrev) confirmModeSelect();
+    gpAPrev = pressed; gpDpadPrev = dpad;
+    return;
+  }
   if(pressed && !gpAPrev) handleAction();
   gpAPrev = pressed;
+  gpDpadPrev = dpad;
 }
 
 function updatePlayerMovement(dt){
@@ -2030,7 +2120,7 @@ function resolveLandings(){
     if(n.landed && !n.resolved){
       n.resolved = true;
       const d = Math.hypot(player.x-n.targetX, player.y-n.targetY);
-      if(d < (n.big?32:22)) damagePlayer(1);
+      if(d < (n.big?32:22)) damagePlayer(D('napkinDamage'));
     }
   }
   for(const b of bottles){
@@ -2089,27 +2179,31 @@ function randomWanderPoint(){
   return {x: WALL_SIDE+40, y: CH-60};
 }
 const REVIEWER_WANDER_SPEED = 50;
-const REVIEWER_FLEE_SPEED = 130; // slower than PLAYER_SPEED (220) -- catchable
-const REVIEWER_FLEE_RADIUS = 120, REVIEWER_FLEE_RESUME_RADIUS = 160; // hysteresis
 const REVIEWER_BEG_RADIUS = 40;
-const REVIEWER_BEG_DURATION = 1.2;
+/* flee speed/radius and beg duration are difficulty-sensitive -- see DIFF
+   (reviewerFleeSpeed/reviewerFleeRadius/begDuration). Normal-mode values
+   below (130 / 120 / +40 resume gap / 1.2) are exactly the old literals. */
 function updateReviewers(dt){
   if(phase!=='beat4_chase') return;
+  const fleeSpeed = D('reviewerFleeSpeed');
+  const fleeRadius = D('reviewerFleeRadius');
+  const fleeResumeRadius = fleeRadius + 40; // hysteresis gap, same proportion as before
+  const begDuration = D('begDuration');
   for(const r of getReviewerList()){
     if(r.reviewGiven) continue;
     if(r.begging){
       r.beggingT += dt;
-      if(r.beggingT >= REVIEWER_BEG_DURATION) completeReview(r);
+      if(r.beggingT >= begDuration) completeReview(r);
       continue;
     }
     const dPlayer = Math.hypot(player.x-r.x, player.y-r.y);
-    if(r.fleeing){ if(dPlayer > REVIEWER_FLEE_RESUME_RADIUS) r.fleeing = false; }
-    else if(dPlayer < REVIEWER_FLEE_RADIUS){ r.fleeing = true; }
+    if(r.fleeing){ if(dPlayer > fleeResumeRadius) r.fleeing = false; }
+    else if(dPlayer < fleeRadius){ r.fleeing = true; }
     let tx, ty, speed;
     if(r.fleeing){
       const ang = Math.atan2(r.y-player.y, r.x-player.x);
       tx = r.x + Math.cos(ang)*40; ty = r.y + Math.sin(ang)*40;
-      speed = REVIEWER_FLEE_SPEED;
+      speed = fleeSpeed;
     } else {
       if(Math.hypot(r.wanderTX-r.x, r.wanderTY-r.y) < 8){
         const wp = randomWanderPoint();
@@ -2147,7 +2241,6 @@ function completeReview(r){
   spawnStarRow(r.x, r.y-70, gameT);
   if(actx) playPickupChime(actx.currentTime);
 }
-const ARAM_SPEED = PLAYER_SPEED*0.8;
 const ARAM_CONTACT_RADIUS = 36, ARAM_CONTACT_COOLDOWN = 1.0, ARAM_IFRAMES = 1.0, ARAM_KNOCKBACK = 40;
 /* dramatic entrance staging (see updatePhase's 'beat4_intro' case) */
 const ARAM_SLAM_AT = 0.5;            // door slam fires this far into the beat
@@ -2192,7 +2285,10 @@ function updateAram(dt){
     if(d>1){
       aram.facing = dx>=0 ? 'right' : 'left';
       aram.walkAnimT += dt;
-      const mx = dx/d*ARAM_SPEED*dt, my = dy/d*ARAM_SPEED*dt;
+      // resolved live (not a module-level const) since hardMode isn't known
+      // until the mode-select card confirms, well after module load
+      const aramSpeed = PLAYER_SPEED * D('aramSpeedMul');
+      const mx = dx/d*aramSpeed*dt, my = dy/d*aramSpeed*dt;
       aram.x = Math.max(WALL_SIDE+18, Math.min(CW-WALL_SIDE-18, aram.x+mx));
       aram.y = Math.max(WALL_TOP+18, Math.min(CH-18, aram.y+my));
     } else {
@@ -2207,7 +2303,7 @@ function updateAram(dt){
 function aramContactDamage(){
   aram.contactCooldown = ARAM_CONTACT_COOLDOWN;
   if(player.iframes>0) return;
-  player.hearts = Math.max(0, player.hearts-1);
+  player.hearts = Math.max(0, player.hearts-D('aramContactDamage'));
   player.iframes = ARAM_IFRAMES;
   stats.hitsTaken++;
   if(actx) playThud(actx.currentTime);
@@ -2386,7 +2482,7 @@ function updatePhase(dt){
       break;
     }
     case 'beat4_chase': {
-      if(stats.reviews>=3){ enterPhase('beat4_turngood'); break; }
+      if(stats.reviews>=D('reviewsNeeded')){ enterPhase('beat4_turngood'); break; }
       if(player.hearts<=0){ gameOverReason='beat4'; enterPhase('gameover'); break; }
       break;
     }
@@ -2474,10 +2570,12 @@ function updatePhase(dt){
     }
     case 'endcard': break;
     case 'gameover': {
-      if(phaseElapsed>GAMEOVER_HOLD) enterPhase('retrycard');
+      // hard mode: losing is real -- no mid-beat retry, straight to the lose card
+      if(phaseElapsed>GAMEOVER_HOLD) enterPhase(hardMode ? 'losecard' : 'retrycard');
       break;
     }
     case 'retrycard': break;
+    case 'losecard': break;
   }
 }
 
@@ -2521,6 +2619,7 @@ function ensureAudioStarted(){
   if(actx.state==='suspended' && actx.resume) actx.resume();
 }
 function handleAction(){
+  if(modeSelectPending) return; // Space is handled by the mode-select keydown branch instead
   hasActionedOnce = true;
   ensureAudioStarted();
   if(activeCard){ activeCard = null; return; }
@@ -2529,6 +2628,7 @@ function handleAction(){
   else if(phase==='boss' && player.hasBottle) throwBottle();
   else if(phase==='beat4_chase') tryBeg();
   else if(phase==='retrycard'){ if(gameOverReason==='beat4') retryBeat4(); else retryBeat2(); }
+  else if(phase==='losecard') window.location.href = '../intro/';
   else if(phase==='endcard') window.location.href = '../intro/';
 }
 function retryBeat2(){
@@ -2570,8 +2670,10 @@ function drawHUD(ctx){
     }
   }
   if(phase==='beat4_chase' || phase==='beat4_turngood'){
-    drawReadingTextOutlined(ctx, stats.reviews+'/3', CW/2, 8, 18, PAL.gold, '#000000', 'center');
-    for(let i=0;i<3;i++) drawStarIcon(ctx, CW/2-36+i*36, 34, i<stats.reviews, 5);
+    const need = D('reviewsNeeded');
+    drawReadingTextOutlined(ctx, stats.reviews+'/'+need, CW/2, 8, 18, PAL.gold, '#000000', 'center');
+    const starsW = (need-1)*36, starsX0 = CW/2 - starsW/2;
+    for(let i=0;i<need;i++) drawStarIcon(ctx, starsX0+i*36, 34, i<stats.reviews, 5);
   }
 }
 /* fading start-of-play hint, bottom-center. Suppressed whenever the
@@ -2887,9 +2989,37 @@ function drawPhaseEndcard(ctx){
     drawReadingText(ctx, 'EARLY PUNCHLINES: '+stats.tooSoon, CW/2, y, 18, PAL.cream, 'center'); y += 34;
   }
   drawReadingText(ctx, 'FIVE-STAR REVIEWS: '+stats.reviews, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  if(phaseData.hardCleared){
+    y += 6;
+    drawReadingText(ctx, 'SECOND SEATING CLEARED', CW/2, y, 18, PAL.gold, 'center'); y += 34;
+  }
   y += 14;
   drawReadingText(ctx, phaseData.rank, CW/2, y, 24, PAL.gold, 'center');
   y += 60;
+  if(!phaseData.wasBeatenBefore){
+    // first-ever unlock -- shown prominently
+    drawChunkyText(ctx, 'HARD MODE UNLOCKED', CW/2, y, 18, PAL.gold, PAL.outline, 'center'); y += 30;
+    drawReadingText(ctx, 'SECOND SEATING AWAITS AT THE START', CW/2, y, 14, PAL.cream, 'center'); y += 34;
+  } else {
+    // already unlocked -- small corner note instead of taking over the card
+    drawReadingText(ctx, 'HARD MODE UNLOCKED', CW-10, 10, 11, PAL.cream, 'right');
+  }
+  if(Math.floor(phaseElapsed)%2===0) drawPixelText(ctx, 'PRESS START', CW/2, y, 16, PAL.cream, 'center');
+}
+function drawPhaseLoseCard(ctx){
+  // hard mode: no mid-beat retry -- this is a terminal screen, same stat
+  // block style as the win end card, but with the loss headline + no rank
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,CW,CH);
+  drawChunkyText(ctx, 'THE DINNER IS RUINED.', CW/2, 130, 34, PAL.gold, PAL.outline, 'center');
+  let y = 230;
+  drawReadingText(ctx, 'LAUGHS CAUGHT: '+stats.heartsCaptured, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  drawReadingText(ctx, 'HITS TAKEN: '+stats.hitsTaken, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  drawReadingText(ctx, 'BOTTLES LANDED: '+stats.bottlesLanded, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  if(stats.tooSoon>0){
+    drawReadingText(ctx, 'EARLY PUNCHLINES: '+stats.tooSoon, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  }
+  drawReadingText(ctx, 'FIVE-STAR REVIEWS: '+stats.reviews, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  y += 40;
   if(Math.floor(phaseElapsed)%2===0) drawPixelText(ctx, 'PRESS START', CW/2, y, 16, PAL.cream, 'center');
 }
 function drawPhaseGameover(ctx){
@@ -2935,10 +3065,11 @@ function draw(){
     case 'endcard': drawPhaseEndcard(ctx); break;
     case 'gameover': drawPhaseGameover(ctx); break;
     case 'retrycard': drawPhaseRetryCard(ctx); break;
+    case 'losecard': drawPhaseLoseCard(ctx); break;
   }
   ctx.restore();
-  if(phase!=='endcard') drawHUD(ctx);
-  if(phase!=='capture' && phase!=='endcard') drawControlsHint(ctx);
+  if(phase!=='endcard' && phase!=='losecard') drawHUD(ctx);
+  if(phase!=='capture' && phase!=='endcard' && phase!=='losecard') drawControlsHint(ctx);
   if(flashAlpha>0){
     ctx.save(); ctx.globalAlpha=flashAlpha; ctx.fillStyle='#fff8ea'; ctx.fillRect(0,0,CW,CH); ctx.restore();
   }
@@ -2991,13 +3122,54 @@ function drawCardOverlay(ctx){
     drawReadingText(ctx, 'SPACE TO CONTINUE', CW/2, y+h-36, 15, PAL.gold, 'center');
   }
 }
+/* mode-select ("CHOOSE YOUR SEATING") -- only ever shown once at boot, and
+   only if the player has beaten the game before (hasBeatenBefore). Reuses
+   cardT for its own highlight blink, same freeze-the-game mechanism as the
+   tutorial cards (see frame()), but has its own input handling (arrow keys/
+   WASD/d-pad move the highlight, Space/A confirms) instead of "any key dismisses". */
+const MODE_SELECT_ROWS = [
+  'FIRST SEATING  --  A NICE DINNER',
+  'SECOND SEATING  --  MUCH HARDER. YOU CAN LOSE.'
+];
+function drawModeSelectOverlay(ctx){
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,CW,CH);
+  ctx.restore();
+  const w = 620, h = 210;
+  const x = CW/2-w/2, y = CH/2-h/2;
+  ctx.fillStyle = PAL.cream; ctx.fillRect(x-4,y-4,w+8,h+8);
+  ctx.fillStyle = '#1a1410'; ctx.fillRect(x,y,w,h);
+  drawChunkyText(ctx, 'CHOOSE YOUR SEATING', CW/2, y+20, 20, PAL.gold, PAL.outline, 'center');
+  let ry = y+82;
+  for(let i=0;i<MODE_SELECT_ROWS.length;i++){
+    const selected = modeSelectIndex===i;
+    if(selected && Math.floor(cardT*2)%2===0){
+      ctx.save(); ctx.fillStyle = 'rgba(232,184,75,0.25)'; ctx.fillRect(x+16, ry-6, w-32, 28); ctx.restore();
+    }
+    drawReadingText(ctx, (selected?'> ':'  ')+MODE_SELECT_ROWS[i], x+28, ry, 15, selected?PAL.gold:PAL.cream, 'left');
+    if(i===1 && hardCleared) drawStarIcon(ctx, x+w-46, ry-1, true, 4);
+    ry += 38;
+  }
+  drawReadingText(ctx, 'ARROWS/WASD: CHOOSE   SPACE: CONFIRM', CW/2, y+h-28, 13, PAL.cream, 'center');
+}
 
 /* ======================================================================
    INPUT + MAIN LOOP
    ====================================================================== */
+const MODE_SELECT_KEYS = new Set(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','KeyW','KeyA','KeyS','KeyD']);
 window.addEventListener('keydown', (e)=>{
   keys[e.code] = true;
   ensureAudioStarted();
+  if(modeSelectPending){
+    if(!e.repeat && MODE_SELECT_KEYS.has(e.code)){
+      modeSelectIndex = 1-modeSelectIndex;
+      if(actx) playBeep(actx.currentTime);
+    }
+    if(e.code==='Space' && !e.repeat){ confirmModeSelect(); e.preventDefault(); }
+    return; // swallow everything else while the mode-select card is up
+  }
   if(e.code==='Space' && !e.repeat){ handleAction(); e.preventDefault(); }
 });
 window.addEventListener('keyup', (e)=>{ keys[e.code] = false; });
@@ -3005,7 +3177,14 @@ window.addEventListener('pointerdown', ()=>{ handleAction(); });
 window.addEventListener('load', ()=>{ try{ ensureAudioStarted(); }catch(e){} });
 
 enterPhase('story'); // populate phaseData.tw for the very first frame
-maybeShowCard('start'); // "DINNER IS SERVED" -- shown once, before round A's story
+if(hasBeatenBefore){
+  // beaten before -- offer a seating choice before the usual DINNER IS
+  // SERVED card. Without the flag, boot exactly as before.
+  modeSelectPending = true;
+  modeSelectIndex = 0; // default highlight: FIRST SEATING
+} else {
+  maybeShowCard('start'); // "DINNER IS SERVED" -- shown once, before round A's story
+}
 
 let lastFrameMs = performance.now();
 function frame(nowMs){
@@ -3013,14 +3192,15 @@ function frame(nowMs){
   const dt = Math.min(0.05, (nowMs-lastFrameMs)/1000);
   lastFrameMs = nowMs;
   pollGamepadAction();
-  if(activeCard){
-    cardT += dt; // independent clock so the card's own blink keeps animating
+  if(modeSelectPending || activeCard){
+    cardT += dt; // independent clock so the card's/menu's own blink keeps animating
   } else {
     gameT += dt;
     update(dt);
   }
   draw();
-  if(activeCard) drawCardOverlay(ctx);
+  if(modeSelectPending) drawModeSelectOverlay(ctx);
+  else if(activeCard) drawCardOverlay(ctx);
   if(actx) schedulerTick();
 }
 requestAnimationFrame(frame);
