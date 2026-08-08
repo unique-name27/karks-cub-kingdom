@@ -2682,10 +2682,13 @@ function ensureAudioStarted(){
   if(actx.state==='suspended' && actx.resume) actx.resume();
 }
 function handleAction(){
-  if(rotatePromptActive) return; // frozen until the phone is turned to landscape
-  if(modeSelectPending) return; // Space is handled by the mode-select keydown branch instead
-  hasActionedOnce = true;
+  // unlock/resume audio FIRST -- this must happen on every user gesture,
+  // even ones the guards below swallow, or a mouse-only player can sit at
+  // the mode-select screen with a permanently suspended AudioContext
   ensureAudioStarted();
+  if(rotatePromptActive) return; // frozen until the phone is turned to landscape
+  if(modeSelectPending) return; // selection is handled by the mode-select keydown/pointer branches
+  hasActionedOnce = true;
   if(activeCard){ activeCard = null; return; }
   if(phase==='prompt') triggerForFree();
   else if(phase==='story') triggerTooSoon();
@@ -3308,7 +3311,15 @@ function screenToLogical(clientX, clientY){
    cards, same as it always could, since there's no joystick-relevant
    gameplay happening on those screens. */
 window.addEventListener('pointerdown', (e)=>{
-  if(e.pointerType!=='touch'){ handleAction(); return; }
+  if(e.pointerType!=='touch'){
+    // mouse: any click must unlock audio even on screens where handleAction
+    // early-returns (the mode-select guard was swallowing the unlock), and
+    // clicking a seating row should work with a mouse too, not just touch
+    ensureAudioStarted();
+    if(modeSelectPending && !rotatePromptActive){ handleModeSelectTouch(screenToLogical(e.clientX, e.clientY)); return; }
+    handleAction();
+    return;
+  }
   isTouch = true; // confirmed by an actual touch, not just the 'ontouchstart' hint
   ensureAudioStarted();
   if(rotatePromptActive) return;
