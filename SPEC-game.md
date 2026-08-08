@@ -82,6 +82,44 @@ The table is solid (collision); diners are solid. Keep 8-px collision grid.
    also shows bottom-center on the first round only.
 5. Short breather, next round. After round B's capture, go to Beat 2.
 
+**Laugh drain (time pressure)**: while the player is anywhere in Beat 1
+(`story`/`prompt`/`capture`/`breather`), the laugh meter ticks DOWN one
+half-unit on a steady clock — every 4.5 s in normal mode, every 2.75 s in
+hard mode (`DIFF.laughDrainInterval`). No drain in Beat 2 or later (napkins
+are the pressure there instead), and the clock automatically pauses whenever
+a card/mode-select/rotate-prompt has the game frozen, since it only advances
+inside `update(dt)`, which `frame()` already skips entirely in those states —
+no extra guarding needed. The economy: stories/punchlines/captures refill the
+meter (the existing scatter/capture), the clock drains it — dawdle between
+punchlines and the room goes cold. Sanity-checked against the actual round
+timings in code: an attentive player (reacts to the prompt immediately,
+actively chases capture tokens) nets positive every round and finishes Beat 1
+with hearts to spare in both modes; a responsive-but-disengaged player (still
+presses through the story/prompt promptly, but never chases capture tokens,
+so gains nothing from them) runs out of laughs partway through round 2 in
+normal mode, and even sooner in hard mode. See "Hard mode" below for the
+hard-mode-specific values.
+
+**Visuals**: the HUD chip that the *next* drain tick will hit pulses and
+fades as the tick approaches (urgency ramps up in roughly the last 40% of the
+interval), and on each lost half a small grey `ha` puff drifts up off the
+meter with a soft, low two-note down-blip (quiet, low-register — reads as
+"a little air going out of the room," not an alarm).
+
+**Death by silence**: if the meter hits 0 during Beat 1:
+- Normal mode: game over with the existing `OKAY. WE GET IT.` treatment →
+  retry card → `TRY AGAIN` calls a new `retryBeat1()`, which restarts the
+  **current** round at its story (hearts back to 6 halves, `roundIndex` left
+  untouched so round progress is preserved, stats keep counting) —
+  `gameOverReason` is set to `'beat1'`.
+- Hard mode: routes through the same `gameover` → lose-card flow as every
+  other hard-mode death (no mid-beat retry) — hard mode's early-press floor
+  removal already allowed a Beat 1 death via mashing; the drain clock is
+  simply a second way to reach the same ending.
+
+The tutorial card (`DINNER IS SERVED`) gained a fourth line:
+`DON'T LET THE LAUGHTER DIE.`
+
 ### Beat 2 — the critic boss
 
 Intro moment: the glasses diner stands up — bubble: `OKAY. WE GET IT.` — walks
@@ -188,8 +226,9 @@ center during the chase: `<n>/3` in gold plus 3 small hand-built star icons.
 phone" for ~1.5 s, then turns good (warmer palette, brows relax) while
 everyone else cheers (bounce + HA bursts + sparkle confetti, fanfare into
 full Theme B). Sequential bubbles: `FIVE STARS...` then `DINNER AT MY PLACE.
-SOMETIME.` — then the freeze frame and end card as before, with an added
-stat line `FIVE-STAR REVIEWS: 3`.
+SOMETIME.` — then flows into the win celebration below (not straight to the
+end card), with an added stat line `FIVE-STAR REVIEWS: 3` on the eventual
+end card.
 
 **Failing Beat 4**: player hearts hit 0 during the chase → same dimmed
 retry-card flow, but the bubble reads `THE REVIEW STANDS.` and `TRY AGAIN`
@@ -204,14 +243,90 @@ HP bar and attack AI never come back) as soon as the revive beat starts, so
 he's actually visible/wanderable/beggable for Beat 3's finale and all of
 Beat 4.
 
+### Win celebration
+
+After Aram turns good: a ~5 s beat where the 3 remaining seated diners + the
+woman + the revived critic + Aram converge loosely around the chef and
+celebrate — continuous staggered bouncing/HA/sparkle bursts (each participant
+on its own cadence so it reads as a crowd, not synchronized robots), a
+~100-piece falling confetti field, a warm lighting lift, a couple of soft
+gold screen flashes, four `FOR FREE?` pop-in/out texts in rotating corners,
+and one final giant centered slam near the end. Then flows into Epilogue A
+(not straight to the end card).
+
+### Epilogue A — the bathroom (~8 s, gameplay locked)
+
+A pure cutscene. The music ducks low. One seated diner gets up and walks to a
+small bathroom door cut into the TOP wall (same dark-gap-plus-wood-frame
+visual language as the other doors). He stops, pulls out his phone (the same
+small phone-rect-over-the-head animation as Beat 4's begging reviewers), and
+delivers three sequential slow-typed bubbles with holds: `DELETE ALL?` …
+`DELETED.` … a longer comedic beat … `ALL MY PHOTOS.` — then a shocked bounce,
+a sad descending synth gliss, and the rest of the table (the two diners not
+involved) erupts in HA bursts. He trudges back to his seat, and Epilogue B
+begins.
+
+### Epilogue B — the guy who built this (~10 s, letterboxed like the Aram staging)
+
+A meta joke: one of the guys flew home and built this exact game. Three
+shots, always letterboxed:
+
+1. A pixel airplane flies right-to-left across a deterministic night-sky/
+   skyline strip (same visual spirit as the intro's starfield). Caption:
+   `ONE OF THE GUYS FLEW HOME...`
+2. Cut to a tiny room: a guy at a desk with a glowing computer screen. The
+   screen renders a miniature KARKS CUB KINGDOM title lockup (the same
+   hand-built pixel-glyph title-canvas system, ported into `game/index.html`
+   since it's a separate document from the intro and can't literally share
+   the canvas object, scaled down small). He types — a tap-tap hand
+   animation plus soft key-blip sound ticks. Caption: `AND BUILT THIS EXACT
+   GAME.`
+3. The sparkle/link flies from his screen and splits into FOUR notifications
+   — the four original diners' sprites appear in a row, each phone pinging
+   with a sparkle burst + a soft chime, one after another. Caption: `AND
+   SHARED IT WITH THE GUYS.`
+
+Then letterbox out, back to the dining room for Beat 5.
+
+### Beat 5 — tech support (playable, no death)
+
+One of the guys is having trouble hearing the game and the player has to
+chase him down and ask if he reset it. Tutorial card (shown once): title
+`TECH SUPPORT` — body `ONE OF THE GUYS CAN'T HEAR THE GAME.` / `CHASE HIM
+DOWN.` / `ASK IF HE RESET IT.`
+
+The target diner wanders/flees exactly like Beat 4's reviewers (a deliberate
+copy+adapt of that same wander/flee algorithm, not a shared call, since the
+two have unrelated completion semantics), with a periodic bubble `I CAN'T
+HEAR THE MUSIC.`. Catching him (within the same ~40 px beg-style radius) and
+pressing the action button shows the chef's own `DID YOU RESET IT?` bubble;
+his replies cycle per catch: 1st `WHAT?`, 2nd `IT'S JUST BEEPING.`, 3rd
+`STILL NO SOUND.`, 4th (final in normal mode) `OH. IT WORKS NOW.` — on the
+final catch the music swells (full duck-up + fanfare), a mini group cheer
+plays (HA bursts from the nearby cast), then freeze → end card. **No damage,
+no laugh drain, no death in this beat** — pure comedy chase. The other two
+seated diners idle/bounce occasionally; Aram (now turned good) just stands
+and watches. Hard mode needs a 5th catch (see Hard mode below); since only
+the 4 listed lines are tone-pre-cleared, the extra catch repeats `STILL NO
+SOUND.` rather than inventing new dialogue, and `OH. IT WORKS NOW.` always
+lands on whichever catch is actually final. The end card gets a new stat
+line `RESETS SUGGESTED: n` (the total number of `DID YOU RESET IT?` asks).
+
 ### Failure state
 
+- **Beat 1** (early press with no floor in hard mode, or the laugh-drain
+  clock hitting 0 in either mode): screen dims, bubble `OKAY. WE GET IT.` →
+  retry card → `TRY AGAIN` calls `retryBeat1()`, restarting the current round
+  at its story (hearts back to 6 halves, round progress preserved, stats
+  keep counting).
 - **Boss fight** (Beat 2): player hearts hit 0 → screen dims, bubble from the
   whole table: `OKAY. WE GET IT.` → retry card (`TRY AGAIN` restarts Beat 2
   with 3 hearts; stats keep counting).
 - **Aram's chase** (Beat 4): player hearts hit 0 → screen dims, bubble:
   `THE REVIEW STANDS.` → retry card restarts Beat 4 (reviews reset; stats
   keep counting; the tutorial card is not reshown).
+- In hard mode, **all three** of the above skip the retry card entirely and
+  go to the lose card instead (see Hard mode).
 
 ### Music
 
@@ -268,7 +383,9 @@ Unlockable, offered after beating the game once, genuinely losable.
   floor** (normal mode floors at 1 half so Beat 1 can never be fatal; hard
   mode has no floor, so three early blurts can and do end the run —
   `OKAY. WE GET IT.` game over); the laugh scatter drops ~40% fewer tokens
-  and they despawn in 4s instead of 6s.
+  and they despawn in 4s instead of 6s; the laugh-drain clock (see Beat 1
+  above) ticks every 2.75s instead of 4.5s — noticeably tighter, since the
+  round itself is also shorter (faster typing, fewer/shorter-lived tokens).
 - Beat 2 (the critic): 8 HP (phase 2 returns at 6, was 4); napkin interval
   1.0s (0.65s in phase 2, was 1.4/0.9); volleys of 4 (6 in phase 2, was 3/5);
   napkin damage is a full heart (2 halves, was 1); duck chance is 35% at
@@ -279,9 +396,13 @@ Unlockable, offered after beating the game once, genuinely losable.
   is a full heart (2 halves, was 1); needs 4 of the 5 reviewers instead of 3;
   begging takes 1.8s instead of 1.2s (longer exposure while stationary);
   reviewers flee at a higher speed and a larger detection radius.
+- Beat 5 (tech support, no death either way): he flees faster (185 px/s vs
+  140) and it takes 5 catches to resolve instead of 4 (`DIFF.techFleeSpeed`,
+  `DIFF.resetsNeeded`).
 - **Losing is real**: in hard mode there is no mid-beat retry. Any game over
-  (a fatal early press in Beat 1, the boss fight, or Aram's chase) skips the
-  usual dimmed-bubble-then-`TRY AGAIN` flow and goes straight to a lose card:
+  (a fatal early press or laugh-drain death in Beat 1, the boss fight, or
+  Aram's chase) skips the usual dimmed-bubble-then-`TRY AGAIN` flow and goes
+  straight to a lose card:
   big `THE DINNER IS RUINED.`, the run's full stat block, and a blinking
   `PRESS START` that returns to the title (`../intro/`) — the whole run
   restarts from scratch, exactly like a fresh page load.
@@ -332,8 +453,9 @@ is hidden.
 - [ ] Wall door appears mid-wall; boss telegraphed arcing napkins are dodgeable via 4 randomized aim patterns, not just one fixed strategy
 - [ ] Riesling pickup/throw/hit loop works; boss duck behavior only above 3 HP
 - [ ] Fake death sequence: slump → jingle start → record scratch → phase 2
-- [ ] Wagyu revive → unison FOR FREE? → Aram's chase/beg/turn-good → end card with stats, reviews, and rank
-- [ ] Game over path works and TRY AGAIN restarts the beat it failed in (Beat 2 or Beat 4)
+- [ ] Wagyu revive → unison FOR FREE? → Aram's chase/beg/turn-good → win celebration → Epilogue A (bathroom) → Epilogue B (meta joke, letterboxed) → Beat 5 (tech support chase, no death) → freeze → end card with stats (including reviews and resets suggested) and rank
+- [ ] Laugh-drain clock ticks only during Beat 1, at the correct interval per mode, pauses whenever a card/mode-select/rotate-prompt freezes the game, and hitting 0 triggers the correct gameover→retry/lose path with round progress preserved on a normal-mode retry
+- [ ] Game over path works and TRY AGAIN restarts the beat it failed in (Beat 1, Beat 2, or Beat 4)
 - [ ] Real mp3 soundtrack plays through musicGain with ducking intact, chiptune SFX unaffected, automatic silent-safe fallback if the track can't load
 - [ ] Hard mode: unlocks on any win, mode-select card gates it correctly, every DIFF constant resolves to its normal value when hardMode is false (byte-identical to pre-hard-mode behavior) and its hard value when true, losing in hard mode always goes to the lose card (never the retry card), hard win sets kck_hard_cleared
 - [ ] Mobile: canvas fits a phone viewport in landscape with no crop; rotate prompt blocks/freezes in portrait and resumes in landscape; joystick drag and action-zone tap work simultaneously via independent pointerIds; desktop mouse/keyboard behavior is unaffected (no joystick drawn, no zoning) when isTouch is false

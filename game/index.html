@@ -724,6 +724,52 @@ function playHaBlip(t){
     osc.start(t+off); osc.stop(t+off+0.08);
   });
 }
+/* quiet, low, two-note DOWN-blip -- one laugh-meter half-heart lost to the
+   drain clock. Deliberately soft (gain 0.045) and low-register so it reads
+   as "a little air going out of the room," not an alarm. */
+function playDrainBlip(t){
+  [['G4',0],['D4',0.09]].forEach(([n,off])=>{
+    const osc = actx.createOscillator(); osc.type='sine';
+    osc.frequency.setValueAtTime(noteToFreq(n), t+off);
+    const g = actx.createGain();
+    g.gain.setValueAtTime(0.045, t+off);
+    g.gain.exponentialRampToValueAtTime(0.001, t+off+0.16);
+    osc.connect(g); g.connect(fxGain);
+    osc.start(t+off); osc.stop(t+off+0.17);
+  });
+}
+/* sad descending synth gliss -- Epilogue A's "deleted all my photos" beat */
+function playSadGliss(t){
+  const osc = actx.createOscillator(); osc.type='triangle';
+  osc.frequency.setValueAtTime(440, t);
+  osc.frequency.exponentialRampToValueAtTime(110, t+0.6);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.001, t);
+  g.gain.linearRampToValueAtTime(0.14, t+0.05);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.65);
+  osc.connect(g); g.connect(fxGain);
+  osc.start(t); osc.stop(t+0.66);
+}
+/* soft high tick -- typing at the desk in Epilogue B */
+function playKeyBlip(t){
+  const osc = actx.createOscillator(); osc.type='square';
+  osc.frequency.setValueAtTime(1800+Math.random()*400, t);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.025, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.025);
+  osc.connect(g); g.connect(fxGain);
+  osc.start(t); osc.stop(t+0.03);
+}
+/* single soft chime -- each of the 4 phone-share pings in Epilogue B */
+function playSoftChime(t){
+  const osc = actx.createOscillator(); osc.type='sine';
+  osc.frequency.setValueAtTime(noteToFreq('A5'), t);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.07, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+0.2);
+  osc.connect(g); g.connect(fxGain);
+  osc.start(t); osc.stop(t+0.22);
+}
 /* low filtered-noise swell -- the critic's transformation moment */
 function playRumble(t){
   const src = actx.createBufferSource(); src.buffer = noiseBuffer; src.loop = true;
@@ -917,6 +963,9 @@ const WALL_TOP = 80, WALL_SIDE = 48;
 const LEFT_DOOR = {x:0, y:248, w:WALL_SIDE, h:104};
 const TABLE = {x:336, y:248, w:288, h:120};
 const BOSS_DOOR = {x:848, y:280, w:104, h:128};
+/* bathroom door, top wall (Epilogue A) -- same dark-gap-plus-wood-frame
+   language as LEFT_DOOR, just cut into the top wall instead of the side one */
+const BATHROOM_DOOR = {x:700, y:0, w:56, h:WALL_TOP};
 /* kitchen doorway: a low wall stub along the bottom-right edge with a dark
    gap cut into it (the player spawns just in front of the gap), and a
    subtle warm light pool spilling from the gap onto the floor. */
@@ -949,6 +998,13 @@ function drawArena(ctx){
   }
   ctx.fillStyle = PAL.wall;
   ctx.fillRect(0,0,CW,WALL_TOP);
+  // bathroom door cut into the top wall (Epilogue A)
+  ctx.fillStyle = '#120c14';
+  ctx.fillRect(BATHROOM_DOOR.x, BATHROOM_DOOR.y, BATHROOM_DOOR.w, BATHROOM_DOOR.h);
+  ctx.fillStyle = PAL.wood;
+  ctx.fillRect(BATHROOM_DOOR.x-6, BATHROOM_DOOR.y, 6, BATHROOM_DOOR.h);
+  ctx.fillRect(BATHROOM_DOOR.x+BATHROOM_DOOR.w, BATHROOM_DOOR.y, 6, BATHROOM_DOOR.h);
+  ctx.fillRect(BATHROOM_DOOR.x-6, BATHROOM_DOOR.h, BATHROOM_DOOR.w+12, 6);
 
   // left wall with the main door cut into it
   ctx.fillRect(0,0,WALL_SIDE,CH);
@@ -1170,6 +1226,79 @@ const STAR_ROWS = ['..1..','.111.','11111','.111.','1.1.1'];
 function drawStarIcon(ctx, x, y, filled, cell){
   cell = cell || 4;
   drawBitmap(ctx, STAR_ROWS, {'1': filled?PAL.gold:PAL.heartEmpty}, x, y, cell);
+}
+
+/* ---------------- hand-built pixel title font (5x7 grid) ----------------
+   Ported from intro/index.html (same file has its own copy -- separate
+   documents/scripts, can't literally share the canvas object) so Epilogue
+   B's "tiny screen" shot can render a miniature KARKS CUB KINGDOM lockup. */
+const TITLE_GLYPHS = {
+  W: ['10001','10001','10001','10101','10101','11011','10001'],
+  A: ['01110','10001','10001','11111','10001','10001','10001'],
+  G: ['01111','10000','10000','10011','10001','10001','01110'],
+  Y: ['10001','10001','01010','00100','00100','00100','00100'],
+  U: ['10001','10001','10001','10001','10001','10001','01110'],
+  K: ['10001','10010','10100','11000','10100','10010','10001'],
+  R: ['11110','10001','10001','11110','10100','10010','10001'],
+  S: ['01111','10000','10000','01110','00001','00001','11110'],
+  C: ['01111','10000','10000','10000','10000','10000','01111'],
+  B: ['11110','10001','10001','11110','10001','10001','11110'],
+  I: ['11111','00100','00100','00100','00100','00100','11111'],
+  N: ['10001','11001','10101','10101','10011','10001','10001'],
+  D: ['11100','10010','10001','10001','10001','10010','11100'],
+  O: ['01110','10001','10001','10001','10001','10001','01110'],
+  M: ['10001','11011','10101','10101','10001','10001','10001']
+};
+const TITLE_GLYPH_COLS = 5, TITLE_GLYPH_ROWS = 7, TITLE_GLYPH_GAP = 1, TITLE_SPACE_COLS = 3;
+function titleLineCols(line){
+  let cols = 0;
+  for(const ch of line) cols += (ch===' ' ? TITLE_SPACE_COLS : TITLE_GLYPH_COLS) + TITLE_GLYPH_GAP;
+  return cols>0 ? cols-TITLE_GLYPH_GAP : 0;
+}
+function buildTitleCanvas(lines, cell){
+  const pad = 3, lineGap = 2;
+  const lineCols = lines.map(titleLineCols);
+  const maxCols = Math.max(...lineCols);
+  const w = (maxCols + pad*2) * cell;
+  const h = (lines.length*TITLE_GLYPH_ROWS + (lines.length-1)*lineGap + pad*2) * cell;
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const o = off.getContext('2d');
+  o.imageSmoothingEnabled = false;
+  function forEach(fn){
+    let rowOffset = pad;
+    for(let li=0; li<lines.length; li++){
+      const line = lines[li];
+      const startCol = pad + Math.floor((maxCols-lineCols[li])/2);
+      let cx = startCol;
+      for(const ch of line){
+        if(ch===' '){ cx += TITLE_SPACE_COLS + TITLE_GLYPH_GAP; continue; }
+        const glyph = TITLE_GLYPHS[ch];
+        if(glyph){
+          for(let r=0;r<TITLE_GLYPH_ROWS;r++){
+            for(let c=0;c<TITLE_GLYPH_COLS;c++){
+              if(glyph[r][c]==='1') fn(cx+c, rowOffset+r);
+            }
+          }
+        }
+        cx += TITLE_GLYPH_COLS + TITLE_GLYPH_GAP;
+      }
+      rowOffset += TITLE_GLYPH_ROWS + lineGap;
+    }
+  }
+  o.fillStyle = 'rgba(20,10,6,0.55)';
+  forEach((gx,gy)=> o.fillRect((gx+1)*cell, (gy+1)*cell, cell, cell));
+  o.fillStyle = PAL.outline;
+  const offs = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
+  forEach((gx,gy)=>{ for(const [dx,dy] of offs) o.fillRect((gx+dx)*cell, (gy+dy)*cell, cell, cell); });
+  o.fillStyle = PAL.gold;
+  forEach((gx,gy)=> o.fillRect(gx*cell, gy*cell, cell, cell));
+  return off;
+}
+let miniTitleCanvasCache = null;
+function getMiniTitleCanvas(){
+  if(!miniTitleCanvasCache) miniTitleCanvasCache = buildTitleCanvas(['KARKS CUB','KINGDOM'], 2);
+  return miniTitleCanvasCache;
 }
 
 /* speech synthesis -- feature-detected, silent fallback per spec */
@@ -1524,7 +1653,7 @@ let woman = { x:24, y:300, active:false, arrived:false };
    Reuses the same "reused fields on a shared entity" convention as everything
    else here (x/y drive both movement and drawing). */
 let aram = { active:false, x:24, y:300, state:'idle', turnedGood:false, contactCooldown:0, facing:'right', walkAnimT:0 };
-let stats = { heartsCaptured:0, hitsTaken:0, bottlesLanded:0, tooSoon:0, reviews:0 };
+let stats = { heartsCaptured:0, hitsTaken:0, bottlesLanded:0, tooSoon:0, reviews:0, resets:0 };
 let bottlePickup = { x:BOTTLE_SPAWN.x, y:BOTTLE_SPAWN.y, active:true, respawnAt:0 };
 let lastTooSoonAt = -999;
 /* ---------------- read-time holds ----------------
@@ -1576,9 +1705,74 @@ const DIFF = {
   reviewsNeeded:       { normal:3,    hard:4 },
   begDuration:         { normal:1.2,  hard:1.8 },
   reviewerFleeSpeed:   { normal:130,  hard:170 },
-  reviewerFleeRadius:  { normal:120,  hard:160 }
+  reviewerFleeRadius:  { normal:120,  hard:160 },
+  laughDrainInterval:  { normal:4.5,  hard:2.75 }, // seconds per half-heart lost during Beat 1
+  techFleeSpeed:       { normal:140,  hard:185 },  // Beat 5 (tech support) flee speed
+  resetsNeeded:        { normal:4,    hard:5 }     // Beat 5 catches needed to resolve
 };
 function D(key){ return DIFF[key][hardMode ? 'hard' : 'normal']; }
+
+/* ---------------- Beat 1 laugh drain (time pressure) ----------------
+   While the player dawdles in any Beat 1 phase, the laugh meter ticks down
+   on a steady clock -- the room's laughter cools if nobody's landing a
+   punchline. Only active during 'story'/'prompt'/'capture'/'breather'; the
+   timer only advances inside update(dt), which frame() already skips
+   entirely while a card/mode-select/rotate-prompt has the game frozen, so
+   the drain pauses there for free with no extra guarding needed. */
+const BEAT1_PHASES = new Set(['story','prompt','capture','breather']);
+let laughDrainTimer = 0;
+function updateLaughDrain(dt){
+  if(!BEAT1_PHASES.has(phase)) return;
+  laughDrainTimer += dt;
+  const interval = D('laughDrainInterval');
+  while(laughDrainTimer >= interval){
+    laughDrainTimer -= interval;
+    applyLaughDrainTick();
+  }
+}
+function applyLaughDrainTick(){
+  if(player.hearts<=0) return; // already dead/dying -- don't pile on
+  player.hearts = Math.max(0, player.hearts-1);
+  spawnDrainPuff();
+  if(actx) playDrainBlip(actx.currentTime);
+  if(player.hearts<=0){
+    gameOverReason = 'beat1';
+    enterPhase('gameover');
+  }
+}
+/* the specific HUD chip-slot the NEXT drain tick will hit -- the last chip
+   with any fill left in it */
+function drainTargetSlot(){
+  if(player.hearts<=0) return -1;
+  return Math.floor((player.hearts-1)/2);
+}
+/* fade + urgency pulse for that slot, 0 (just ticked) .. 1 (about to tick) */
+function drainPulseAlpha(progress, t){
+  const fade = 1 - progress*0.35;
+  const urgentPulse = progress>0.6 ? (0.7 + 0.3*Math.sin(t*10)) : 1;
+  return fade*urgentPulse;
+}
+/* small grey "ha" puffs drifting off the meter, one per lost half -- a
+   dedicated screen-space particle list (not the world-space `particles`
+   array) since the HUD isn't affected by the screen-shake translate */
+let drainPuffs = [];
+function spawnDrainPuff(){
+  const slot = drainTargetSlot();
+  const x = 16+Math.max(0,slot)*28+13, y = 16+13;
+  drainPuffs.push({x, y, vy:-16, born:gameT, life:1.1});
+}
+function updateAndDrawDrainPuffs(ctx){
+  for(const p of drainPuffs){
+    const age = gameT-p.born;
+    if(age<0 || age>p.life) continue;
+    const a = 1-age/p.life;
+    const py = p.y + p.vy*age;
+    ctx.save(); ctx.globalAlpha = a*0.85;
+    drawReadingText(ctx, 'ha', p.x, py, 12, '#8a8a8a', 'center');
+    ctx.restore();
+  }
+  drainPuffs = drainPuffs.filter(p=> (gameT-p.born) <= p.life);
+}
 
 /* mode-select card (shown at boot only if the player has beaten the game
    before) + localStorage flags, all feature-detected/try-caught since
@@ -1774,6 +1968,58 @@ function enterPhase(name){
       setMusicProgram(loopProgram('B'), 130);
     }
     if(speechWorked===true) speakForFree();
+  } else if(name==='epilogueA'){
+    // THE BATHROOM: one seated diner steps away, has a small phone-related
+    // crisis, and the table laughs at him before he trudges back. Gameplay
+    // locked throughout -- pure cutscene.
+    player.canMove = false;
+    phaseData.stage = 0;
+    phaseData.diner = diners[2];
+    // NOT setting .walking here -- that flag is only rendered specially for
+    // the critic's transform (drawBaseScene); everyone else, including this
+    // diner, is just drawn wherever d.x/d.y currently are as long as
+    // walking/retired are both false, same as the Beat 4/5 wandering diners.
+    phaseData.startX = phaseData.diner.x; phaseData.startY = phaseData.diner.y;
+    phaseData.doorX = BATHROOM_DOOR.x + BATHROOM_DOOR.w/2;
+    phaseData.doorY = BATHROOM_DOOR.h + 40;
+    if(actx) duckDown(actx.currentTime, 0.3);
+  } else if(name==='epilogueB'){
+    // THE GUY WHO BUILT THIS: a letterboxed meta-joke cutaway (three shots:
+    // plane home, tiny room / desk / mini title on the screen, sharing with
+    // the 4 guys), then back to the dining room for Beat 5.
+    player.canMove = false;
+    phaseData.stage = 1;
+    phaseData.lastKeyBlipAt = -999;
+    phaseData.pingIndex = 0;
+    if(actx) duckDown(actx.currentTime, 0.25);
+  } else if(name==='beat5_chase'){
+    // TECH SUPPORT: pure comedy chase, no damage/drain/death. Reuses the
+    // Beat 4 flee/wander pattern (see updateBeat5) on a single target.
+    player.canMove = true;
+    const r = beat5Target();
+    r.fleeing = false; r.begging = false; r.beggingT = 0; r.replied = false;
+    r.catchCount = 0; r.bubble = null;
+    r.wanderTX = r.x; r.wanderTY = r.y;
+    stats.resets = 0;
+    phaseData.lastBubbleAt = -999;
+    drumsOn = true; harmonyOn = true; hatsSixteenths = false;
+    if(actx){ musicDir.droneOn = false; setMusicProgram(loopProgram('A'), 120); }
+    maybeShowCard('beat5');
+  } else if(name==='beat5_resolve'){
+    player.canMove = false;
+    triggerShake(5, 0.3);
+    const r = beat5Target();
+    for(const d of diners){ if(!d.walking && !d.retired) d.bounceT = 0.001; }
+    spawnHaBurst(r.x, r.y-40, gameT);
+    if(woman.active) spawnHaBurst(woman.x, woman.y-40, gameT);
+    if(boss.state==='revived') spawnHaBurst(boss.x, boss.y-40, gameT);
+    if(actx){
+      const now = actx.currentTime;
+      duckUp(now, 1.0);
+      playFanfare(now);
+      drumsOn = true; harmonyOn = true; hatsSixteenths = true;
+      setMusicProgram(onceProgram(['B']), 118);
+    }
   } else if(name==='endcard'){
     phaseData.rank = computeRank();
     // any win unlocks hard mode ("SECOND SEATING") -- only shown big the
@@ -2297,6 +2543,94 @@ function completeReview(r){
   spawnStarRow(r.x, r.y-70, gameT);
   if(actx) playPickupChime(actx.currentTime);
 }
+
+/* ======================================================================
+   BEAT 5 -- TECH SUPPORT (post-epilogue final level: pure comedy chase,
+   no damage/drain/death). Target is always diners[0] -- a fixed pick, not
+   stored in phaseData, so it survives enterPhase()'s phaseData reset
+   between 'beat5_chase' and 'beat5_resolve' without extra plumbing.
+   The wander/flee movement below is a deliberate copy+adapt of
+   updateReviewers' algorithm (same codebase convention as the duplicated
+   audio engine) rather than a shared call, since the two have unrelated
+   completion semantics (review-given vs. catch-count/reply-cycling).
+   ====================================================================== */
+function beat5Target(){ return diners[0]; }
+const TECH_SUPPORT_MID_REPLIES = ['WHAT?', "IT'S JUST BEEPING.", 'STILL NO SOUND.'];
+const TECH_SUPPORT_FINAL_REPLY = 'OH. IT WORKS NOW.';
+/* normal mode's 4 catches map 1:1 onto the 3 mid-replies + the final one;
+   hard mode's extra (5th) catch repeats the last mid-reply rather than
+   inventing new dialogue, since only these 4 lines are tone-pre-cleared */
+function techSupportReply(catchNum, isFinal){
+  if(isFinal) return TECH_SUPPORT_FINAL_REPLY;
+  const idx = Math.min(catchNum, TECH_SUPPORT_MID_REPLIES.length) - 1;
+  return TECH_SUPPORT_MID_REPLIES[idx];
+}
+function tryAskReset(){
+  const r = beat5Target();
+  if(r.begging) return;
+  const d = Math.hypot(player.x-r.x, player.y-r.y);
+  if(d >= REVIEWER_BEG_RADIUS) return;
+  r.begging = true; r.beggingT = 0; r.replied = false; r.fleeing = false;
+  r.catchCount = (r.catchCount||0) + 1;
+  stats.resets = (stats.resets||0) + 1;
+  playerBubble = { text: 'DID YOU RESET IT?', born: gameT };
+  if(speechWorked===true) speakLine('Did you reset it?', 1.0, 0.7);
+}
+function updateBeat5(dt){
+  if(phase!=='beat5_chase') return;
+  const r = beat5Target();
+  if(r.begging){
+    r.beggingT += dt;
+    if(r.beggingT>=1.0 && !r.replied){
+      r.replied = true;
+      const need = D('resetsNeeded');
+      const isFinal = r.catchCount >= need;
+      r.bubble = { text: techSupportReply(r.catchCount, isFinal), born: gameT };
+      if(isFinal){ enterPhase('beat5_resolve'); return; }
+    } else if(r.replied && r.beggingT>=2.2){
+      r.begging = false; r.replied = false; r.beggingT = 0;
+    }
+    // occasional idle bounce for the two bystanders while he's caught
+    if(Math.random()<0.003){
+      const od = diners[Math.random()<0.5?2:3];
+      if(!od.walking && !od.retired && od.bounceT<=0) od.bounceT = 0.001;
+    }
+    return;
+  }
+  const fleeSpeed = D('techFleeSpeed');
+  const fleeRadius = 120, fleeResumeRadius = 160; // same feel as Beat 4's normal-mode default
+  const dPlayer = Math.hypot(player.x-r.x, player.y-r.y);
+  if(r.fleeing){ if(dPlayer > fleeResumeRadius) r.fleeing = false; }
+  else if(dPlayer < fleeRadius){ r.fleeing = true; }
+  let tx, ty, speed;
+  if(r.fleeing){
+    const ang = Math.atan2(r.y-player.y, r.x-player.x);
+    tx = r.x + Math.cos(ang)*40; ty = r.y + Math.sin(ang)*40;
+    speed = fleeSpeed;
+  } else {
+    if(Math.hypot(r.wanderTX-r.x, r.wanderTY-r.y) < 8){
+      const wp = randomWanderPoint();
+      r.wanderTX = wp.x; r.wanderTY = wp.y;
+    }
+    tx = r.wanderTX; ty = r.wanderTY;
+    speed = REVIEWER_WANDER_SPEED;
+  }
+  const dx = tx-r.x, dy = ty-r.y, d = Math.hypot(dx,dy);
+  if(d>1){
+    const mx = dx/d*speed*dt, my = dy/d*speed*dt;
+    r.x = Math.max(WALL_SIDE+16, Math.min(CW-WALL_SIDE-16, r.x+mx));
+    r.y = Math.max(WALL_TOP+16, Math.min(CH-16, r.y+my));
+  }
+  if(gameT - (phaseData.lastBubbleAt===undefined?-999:phaseData.lastBubbleAt) > 4.0){
+    phaseData.lastBubbleAt = gameT;
+    r.bubble = { text: "I CAN'T HEAR THE MUSIC.", born: gameT };
+  }
+  // occasional idle bounce for the two bystanders
+  if(Math.random()<0.003){
+    const od = diners[Math.random()<0.5?2:3];
+    if(!od.walking && !od.retired && od.bounceT<=0) od.bounceT = 0.001;
+  }
+}
 const ARAM_CONTACT_RADIUS = 36, ARAM_CONTACT_COOLDOWN = 1.0, ARAM_IFRAMES = 1.0, ARAM_KNOCKBACK = 40;
 /* dramatic entrance staging (see updatePhase's 'beat4_intro' case) */
 const ARAM_SLAM_AT = 0.5;            // door slam fires this far into the beat
@@ -2617,7 +2951,97 @@ function updatePhase(dt){
           flashAlpha = 0.4;
         }
       }
-      if(phaseElapsed>CELEBRATION_DURATION) enterPhase('freeze');
+      if(phaseElapsed>CELEBRATION_DURATION) enterPhase('epilogueA');
+      break;
+    }
+    case 'epilogueA': {
+      const EP_A_WALK_DUR = 1.4;
+      const d = phaseData.diner;
+      if(phaseData.stage===0){
+        const t = clamp01(phaseElapsed/EP_A_WALK_DUR);
+        d.x = lerp(phaseData.startX, phaseData.doorX, t);
+        d.y = lerp(phaseData.startY, phaseData.doorY, t);
+        if(t>=1){
+          phaseData.stage = 1;
+          phaseData.bubbleTw = makeTypewriter(['DELETE ALL?'], 12, 0.4);
+          phaseData.bubbleStart = phaseElapsed;
+        }
+      } else if(phaseData.stage===1){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(local > phaseData.bubbleTw.doneAt + DIALOGUE_GAP){
+          phaseData.stage = 2;
+          phaseData.bubbleTw = makeTypewriter(['DELETED.'], 12, 0.4);
+          phaseData.bubbleStart = phaseElapsed;
+        }
+      } else if(phaseData.stage===2){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(local > phaseData.bubbleTw.doneAt + 1.3){ // "...beat..." -- a longer comedic pause
+          phaseData.stage = 3;
+          phaseData.bubbleTw = makeTypewriter(['ALL MY PHOTOS.'], 12, 0.4);
+          phaseData.bubbleStart = phaseElapsed;
+        }
+      } else if(phaseData.stage===3){
+        const local = phaseElapsed-phaseData.bubbleStart;
+        updateTypewriterAudio(phaseData.bubbleTw, local);
+        if(local > phaseData.bubbleTw.doneAt + 0.3){
+          phaseData.stage = 4;
+          phaseData.reactAt = phaseElapsed;
+          d.bounceT = 0.001;
+          if(actx) playSadGliss(actx.currentTime);
+          for(const idx of [0,3]){ // "the rest of the table" (not the boss seat, not the diner who left)
+            const od = diners[idx];
+            if(!od.walking && !od.retired) spawnHaBurst(od.x, od.y-40, gameT);
+          }
+        }
+      } else if(phaseData.stage===4){
+        if(phaseElapsed - phaseData.reactAt > 1.2){
+          phaseData.stage = 5;
+          phaseData.walkBackStart = phaseElapsed;
+        }
+      } else if(phaseData.stage===5){
+        const t = clamp01((phaseElapsed-phaseData.walkBackStart)/EP_A_WALK_DUR);
+        d.x = lerp(phaseData.doorX, phaseData.startX, t);
+        d.y = lerp(phaseData.doorY, phaseData.startY, t);
+        if(t>=1){
+          d.x = phaseData.startX; d.y = phaseData.startY;
+          enterPhase('epilogueB');
+        }
+      }
+      break;
+    }
+    case 'epilogueB': {
+      const EPB_SHOT1_DUR = 2.6, EPB_SHOT2_DUR = 3.6, EPB_SHOT3_DUR = 3.4;
+      if(phaseData.stage===1){
+        if(phaseElapsed > EPB_SHOT1_DUR){ phaseData.stage=2; phaseData.stage2At=phaseElapsed; }
+      } else if(phaseData.stage===2){
+        const local = phaseElapsed - phaseData.stage2At;
+        if(local - phaseData.lastKeyBlipAt >= 0.18){
+          phaseData.lastKeyBlipAt = local;
+          if(actx) playKeyBlip(actx.currentTime);
+        }
+        if(local > EPB_SHOT2_DUR){ phaseData.stage=3; phaseData.stage3At=phaseElapsed; }
+      } else if(phaseData.stage===3){
+        const local = phaseElapsed - phaseData.stage3At;
+        const pingTimes = [0.3,0.9,1.5,2.1];
+        if(phaseData.pingIndex<4 && local>=pingTimes[phaseData.pingIndex]){
+          const idx = phaseData.pingIndex;
+          spawnSparkleBurst(EPB_FACE_XS[idx], EPB_FACE_Y+10, 6, gameT);
+          if(actx) playSoftChime(actx.currentTime);
+          phaseData.pingIndex++;
+        }
+        if(local > EPB_SHOT3_DUR){ enterPhase('beat5_chase'); }
+      }
+      break;
+    }
+    case 'beat5_chase': {
+      // no damage/drain/death here -- resolution happens inside updateBeat5
+      // (called from update()) once the final catch lands
+      break;
+    }
+    case 'beat5_resolve': {
+      if(phaseElapsed > 2.2) enterPhase('freeze');
       break;
     }
     case 'freeze': {
@@ -2641,10 +3065,12 @@ function update(dt){
   updateBoss(dt);
   updateAram(dt);
   updateReviewers(dt);
+  updateBeat5(dt);
   updateNapkins(dt, gameT);
   updateBottles(dt, gameT);
   resolveLandings();
   updatePhase(dt);
+  updateLaughDrain(dt);
   if(flashAlpha>0) flashAlpha = Math.max(0, flashAlpha - 3*dt);
   if(controlsHintAlpha>0 && ((hasMovedOnce && hasActionedOnce) || gameT>=10)){
     controlsHintAlpha = Math.max(0, controlsHintAlpha - dt/0.5); // 0.5s fade
@@ -2691,9 +3117,24 @@ function handleAction(){
   else if(phase==='story') triggerTooSoon();
   else if(phase==='boss' && player.hasBottle) throwBottle();
   else if(phase==='beat4_chase') tryBeg();
-  else if(phase==='retrycard'){ if(gameOverReason==='beat4') retryBeat4(); else retryBeat2(); }
+  else if(phase==='beat5_chase') tryAskReset();
+  else if(phase==='retrycard'){
+    if(gameOverReason==='beat4') retryBeat4();
+    else if(gameOverReason==='beat1') retryBeat1();
+    else retryBeat2();
+  }
   else if(phase==='losecard') window.location.href = '../intro/';
   else if(phase==='endcard') window.location.href = '../intro/';
+}
+/* Beat 1 game over (hard-mode early-press death with no floor, or the new
+   normal-mode laugh-drain death) -- restarts the CURRENT round at its story.
+   roundIndex is left untouched on purpose ("round progress preserved") and
+   stats keep counting, matching retryBeat2/retryBeat4's conventions. */
+function retryBeat1(){
+  player.hearts = 6; player.canMove = true;
+  heartPickups = [];
+  laughDrainTimer = 0;
+  enterPhase('story');
 }
 function retryBeat2(){
   player.hearts = 6; player.hasBottle = false; player.canMove = true;
@@ -2714,13 +3155,25 @@ function retryBeat4(){
    ====================================================================== */
 function drawHUD(ctx){
   const slots = player.maxHearts/2;
+  // during Beat 1, the chip the next drain tick will hit pulses/fades so the
+  // meter reads as "the laughter is dying" ahead of time, not just after
+  const pulseSlot = BEAT1_PHASES.has(phase) ? drainTargetSlot() : -1;
+  const drainProgress = BEAT1_PHASES.has(phase) ? laughDrainTimer/D('laughDrainInterval') : 0;
   for(let i=0;i<slots;i++){
     const unit = i*2;
     let fill = 0;
     if(player.hearts >= unit+2) fill = 1;
     else if(player.hearts >= unit+1) fill = 0.5;
-    drawHeart(ctx, 16+i*28, 16, 3.0, fill);
+    if(i===pulseSlot && fill>0){
+      ctx.save();
+      ctx.globalAlpha = drainPulseAlpha(drainProgress, gameT);
+      drawHeart(ctx, 16+i*28, 16, 3.0, fill);
+      ctx.restore();
+    } else {
+      drawHeart(ctx, 16+i*28, 16, 3.0, fill);
+    }
   }
+  updateAndDrawDrainPuffs(ctx);
   if(player.hasBottle) drawBottle(ctx, 18, 50, 2.2);
   // hidden during 'fakedeath' -- the bar "shatters" at the fake-kill hit and
   // only reappears (with 4 segments) once phase 2 actually starts.
@@ -2836,16 +3289,23 @@ function drawBaseScene(ctx){
 }
 /* Beat 4: a small phone rect (blinking "tap") over a reviewer mid-beg, or a
    small permanent gold star once they've handed over their five stars */
+/* small phone rect + tapping blink, held over a character's head -- shared by
+   Beat 4's begging reviewers, Epilogue A's "delete all?" beat, and Beat 5's
+   tech-support chase. `tapT` just needs to be *some* clock that keeps
+   advancing (beggingT, phaseElapsed, gameT*k...) -- only its parity matters. */
+function drawPhoneIcon(ctx, x, y, tapT){
+  const tap = Math.floor(tapT*6)%2===0;
+  ctx.save();
+  ctx.fillStyle = '#1c1c1c';
+  ctx.fillRect(x-9, y-96, 18, 26);
+  ctx.fillStyle = tap ? '#8fd0ff' : '#4a6a80';
+  ctx.fillRect(x-6, y-92, 12, 18);
+  ctx.restore();
+}
 function drawReviewerOverlays(ctx){
   for(const r of getReviewerList()){
     if(r.begging){
-      const tap = Math.floor(r.beggingT*6)%2===0;
-      ctx.save();
-      ctx.fillStyle = '#1c1c1c';
-      ctx.fillRect(r.x-9, r.y-96, 18, 26);
-      ctx.fillStyle = tap ? '#8fd0ff' : '#4a6a80';
-      ctx.fillRect(r.x-6, r.y-92, 12, 18);
-      ctx.restore();
+      drawPhoneIcon(ctx, r.x, r.y, r.beggingT);
     } else if(r.reviewGiven){
       drawStarIcon(ctx, r.x-8, r.y-98, true, 4);
     }
@@ -2988,6 +3448,57 @@ function drawLetterbox(ctx, t){
   ctx.fillRect(0,CH-h,CW,h);
   ctx.restore();
 }
+
+/* ---------------- Epilogue B visuals (the meta-joke cutaway) ---------------- */
+/* deterministic star field (no Math.random at draw time), same spirit as the
+   intro's own "no flicker" skyline convention */
+const EPB_STARS = (function(){
+  const arr = [];
+  for(let i=0;i<40;i++) arr.push({x:(i*53+17)%CW, y:(i*37+11)%260});
+  return arr;
+})();
+const EPB_SKYLINE = [[0,90,70],[90,70,110],[170,100,50],[280,80,130],[380,120,90],[520,90,60],[630,110,100],[760,90,75],[860,100,60]];
+function drawEpBNightSky(ctx){
+  ctx.fillStyle = PAL.night; ctx.fillRect(0,0,CW,CH);
+  ctx.fillStyle = '#fff3c9';
+  for(const s of EPB_STARS) ctx.fillRect(s.x, s.y, 2, 2);
+  ctx.fillStyle = '#1c1c36';
+  for(const [bx,bw,bh] of EPB_SKYLINE) ctx.fillRect(bx, CH-bh, bw, bh);
+}
+function drawEpBPlane(ctx, x, y){
+  ctx.fillStyle = '#cfd6de';
+  ctx.fillRect(x-18, y-2, 36, 4);
+  ctx.fillRect(x-4, y-8, 8, 4);
+  ctx.fillRect(x+6, y-6, 3, 12);
+  drawPixelCircle(ctx, x+16, y, 2, '#fff3c9', 2);
+}
+function drawEpBDeskRoom(ctx, t){
+  ctx.fillStyle = '#140f18'; ctx.fillRect(0,0,CW,CH);
+  const deskX = CW/2, deskY = 360;
+  ctx.save(); ctx.globalAlpha=0.25; drawPixelCircle(ctx, deskX, deskY-60, 90, '#8fd0ff', 8); ctx.restore();
+  ctx.fillStyle = '#0a0e14'; ctx.fillRect(deskX-90, deskY-120, 180, 110);
+  ctx.fillStyle = '#123047'; ctx.fillRect(deskX-80, deskY-110, 160, 90);
+  const tc = getMiniTitleCanvas();
+  const scale = 0.55;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(tc, deskX-tc.width*scale/2, deskY-105, tc.width*scale, tc.height*scale);
+  ctx.fillStyle = PAL.wood; ctx.fillRect(deskX-100, deskY-10, 200, 14);
+  drawTile(ctx, rawTile(imgDungeon, DINER_DEFS[3].col, DINER_DEFS[3].row), deskX-16, deskY-70, 2, false);
+  const tap = Math.floor(t*7)%2===0;
+  ctx.fillStyle = tap ? '#f3e9d2' : '#c9b98a';
+  ctx.fillRect(deskX-14, deskY-6, 10, 6);
+  ctx.fillRect(deskX+4, deskY-6, 10, 6);
+}
+const EPB_FACE_XS = [300, 420, 540, 660], EPB_FACE_Y = 260;
+function drawEpBSharing(ctx, pingIndex){
+  ctx.fillStyle = '#140f18'; ctx.fillRect(0,0,CW,CH);
+  for(let i=0;i<4;i++){
+    const fx = EPB_FACE_XS[i], fy = EPB_FACE_Y;
+    const def = DINER_DEFS[i];
+    drawTile(ctx, rawTile(imgDungeon, def.col, def.row), fx-32, fy-64, 2.5, false);
+    if(i < pingIndex) drawPhoneIcon(ctx, fx, fy+14, gameT*6);
+  }
+}
 function drawPhaseBeat4Intro(ctx){
   drawBaseScene(ctx);
   const dimT = clamp01(phaseElapsed/ARAM_SLAM_AT);
@@ -3037,7 +3548,43 @@ function drawPhaseCelebration(ctx){
     drawChunkyText(ctx, 'FOR FREE?', CW/2, CH/2-20, 60, PAL.gold, PAL.outline, 'center');
   }
 }
-/* 'freeze' is entered from the celebration now -- just holds the final slam */
+function drawPhaseEpilogueA(ctx){
+  drawBaseScene(ctx);
+  if(phaseData.stage>=1 && phaseData.stage<=3){
+    drawPhoneIcon(ctx, phaseData.diner.x, phaseData.diner.y, phaseElapsed);
+    if(phaseData.bubbleTw){
+      const local = phaseElapsed-phaseData.bubbleStart;
+      const state = phaseData.bubbleTw.getState(local);
+      drawAutoBubble(ctx, phaseData.bubbleTw.lines[0].slice(0,state[0]), phaseData.diner.x, phaseData.diner.y-64, 16, 1);
+    }
+  }
+}
+function drawPhaseEpilogueB(ctx){
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,CW,CH);
+  if(phaseData.stage===1){
+    drawEpBNightSky(ctx);
+    const t = clamp01(phaseElapsed/2.6);
+    drawEpBPlane(ctx, lerp(CW+40, -40, t), 160);
+    drawReadingTextOutlined(ctx, 'ONE OF THE GUYS FLEW HOME...', CW/2, CH-70, 18, PAL.cream, '#000000', 'center');
+  } else if(phaseData.stage===2){
+    drawEpBDeskRoom(ctx, phaseElapsed-phaseData.stage2At);
+    drawReadingTextOutlined(ctx, 'AND BUILT THIS EXACT GAME.', CW/2, CH-70, 18, PAL.cream, '#000000', 'center');
+  } else if(phaseData.stage===3){
+    drawEpBSharing(ctx, phaseData.pingIndex);
+    drawReadingTextOutlined(ctx, 'AND SHARED IT WITH THE GUYS.', CW/2, CH-70, 18, PAL.cream, '#000000', 'center');
+  }
+  drawLetterbox(ctx, 1);
+}
+function drawPhaseBeat5Chase(ctx){
+  drawBaseScene(ctx);
+  const r = beat5Target();
+  if(r.begging || r.fleeing) drawPhoneIcon(ctx, r.x, r.y, r.begging ? r.beggingT : gameT*6);
+  if(r.bubble && (gameT-r.bubble.born)<CRITIQUE_BUBBLE_HOLD){
+    drawAutoBubble(ctx, r.bubble.text, r.x, r.y-64, 16, 1);
+  }
+}
+function drawPhaseBeat5Resolve(ctx){ drawBaseScene(ctx); }
+/* 'freeze' is entered from Beat 5's resolution now -- just holds the final slam */
 function drawPhaseFreeze(ctx){
   drawBaseScene(ctx);
   drawChunkyText(ctx, 'FOR FREE?', CW/2, CH/2-20, 60, PAL.gold, PAL.outline, 'center');
@@ -3053,6 +3600,7 @@ function drawPhaseEndcard(ctx){
     drawReadingText(ctx, 'EARLY PUNCHLINES: '+stats.tooSoon, CW/2, y, 18, PAL.cream, 'center'); y += 34;
   }
   drawReadingText(ctx, 'FIVE-STAR REVIEWS: '+stats.reviews, CW/2, y, 18, PAL.cream, 'center'); y += 34;
+  drawReadingText(ctx, 'RESETS SUGGESTED: '+stats.resets, CW/2, y, 18, PAL.cream, 'center'); y += 34;
   if(phaseData.hardCleared){
     y += 6;
     drawReadingText(ctx, 'SECOND SEATING CLEARED', CW/2, y, 18, PAL.gold, 'center'); y += 34;
@@ -3125,6 +3673,10 @@ function draw(){
     case 'beat4_chase': drawPhaseBeat4Chase(ctx); break;
     case 'beat4_turngood': drawPhaseBeat4TurnGood(ctx); break;
     case 'celebration': drawPhaseCelebration(ctx); break;
+    case 'epilogueA': drawPhaseEpilogueA(ctx); break;
+    case 'epilogueB': drawPhaseEpilogueB(ctx); break;
+    case 'beat5_chase': drawPhaseBeat5Chase(ctx); break;
+    case 'beat5_resolve': drawPhaseBeat5Resolve(ctx); break;
     case 'freeze': drawPhaseFreeze(ctx); break;
     case 'endcard': drawPhaseEndcard(ctx); break;
     case 'gameover': drawPhaseGameover(ctx); break;
@@ -3151,10 +3703,11 @@ function draw(){
    separate "paused snapshot" code path.
    ====================================================================== */
 const CARDS = {
-  start: { key:'start', title:'DINNER IS SERVED', body:['THE GUYS TELL THEIR STORIES.','WAIT FOR THE LAST WORD...','THEN HIT SPACE.'] },
+  start: { key:'start', title:'DINNER IS SERVED', body:['THE GUYS TELL THEIR STORIES.','WAIT FOR THE LAST WORD...','THEN HIT SPACE.',"DON'T LET THE LAUGHTER DIE."] },
   capture: { key:'capture', title:'CATCH THE LAUGHS!', body:['THE TABLE IS LOSING IT.','RUN AROUND AND SOAK UP EVERY HA.'] },
   boss: { key:'boss', title:'THE CRITIC', body:['DODGE HIS REVIEWS.','STAND ON THE RIESLING TO GRAB IT.','SPACE TO THROW.'] },
-  aram: { key:'aram', title:'ARAM HAS ARRIVED', body:['CHEF GABE\'S BOSS SAW A BAD REVIEW.','CHASE THE GUYS. BEG FOR FIVE STARS.','DON\'T GET CAUGHT.'] }
+  aram: { key:'aram', title:'ARAM HAS ARRIVED', body:['CHEF GABE\'S BOSS SAW A BAD REVIEW.','CHASE THE GUYS. BEG FOR FIVE STARS.','DON\'T GET CAUGHT.'] },
+  beat5: { key:'beat5', title:'TECH SUPPORT', body:["ONE OF THE GUYS CAN'T HEAR THE GAME.",'CHASE HIM DOWN.','ASK IF HE RESET IT.'] }
 };
 let activeCard = null;
 let pendingCard = null, pendingCardAt = 0;
