@@ -670,12 +670,7 @@ function playTwang(t, gainMul){
   burst.start(t); burst.stop(t+dur+0.1);
 }
 function playBeep(t){
-  const osc = actx.createOscillator(); osc.type='square'; osc.frequency.value = 880;
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.05, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.025);
-  osc.connect(g); g.connect(fxGain);
-  osc.start(t); osc.stop(t+0.03);
+  // typewriter beep removed by request -- the per-character chirp read as "loud beeping"
 }
 function playDing(t){
   const osc = actx.createOscillator(); osc.type='sine'; osc.frequency.value = 1320;
@@ -1236,7 +1231,7 @@ function drawScene5(ctx, localT, se){
   ctx.drawImage(wc, Math.round(CW/2-lw/2), 120, lw, lh);
   drawLogoSparkleCross(ctx, CW/2, 200, localT);
   drawRibbon(ctx, CW/2, 335, 220, 40);
-  drawPixelText(ctx, 'FOR FREE?', CW/2, 322, 16, PAL.cream, 'center');
+  drawReadingTextOutlined(ctx, 'FOR FREE?', CW/2, 324, 20, PAL.cream, '#000000', 'center');
   const blinkOn = Math.floor(localT)%2===0;
   if(blinkOn) drawReadingTextOutlined(ctx, 'PRESS START', CW/2, 404, 26, PAL.cream, '#000000', 'center');
   drawReadingTextOutlined(ctx, 'ARROWS / WASD -- MOVE      SPACE -- SAY IT / THROW', CW/2, 444, 17, PAL.cream, '#000000', 'center');
@@ -1246,7 +1241,8 @@ function drawScene5(ctx, localT, se){
 function drawBoot(nowMs){
   ctx.fillStyle = '#000'; ctx.fillRect(0,0,CW,CH);
   const on = Math.floor(nowMs/500)%2===0;
-  if(on) drawReadingTextOutlined(ctx, 'PRESS ANY BUTTON', CW/2, CH/2-8, 28, PAL.cream, '#000000', 'center');
+  if(on) drawReadingTextOutlined(ctx, 'CLICK TO START', CW/2, CH/2-20, 30, PAL.cream, '#000000', 'center');
+  drawReadingTextOutlined(ctx, '(OR PRESS ANY KEY)', CW/2, CH/2+22, 15, PAL.cream, '#000000', 'center');
 }
 
 /* ======================================================================

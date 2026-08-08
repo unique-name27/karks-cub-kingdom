@@ -573,12 +573,7 @@ function playTwang(t, gainMul){
   burst.start(t); burst.stop(t+dur+0.1);
 }
 function playBeep(t){
-  const osc = actx.createOscillator(); osc.type='square'; osc.frequency.value = 880;
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.05, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.025);
-  osc.connect(g); g.connect(fxGain);
-  osc.start(t); osc.stop(t+0.03);
+  // typewriter beep removed by request -- the per-character chirp read as "loud beeping"
 }
 function playDing(t){
   const osc = actx.createOscillator(); osc.type='sine'; osc.frequency.value = 1320;
