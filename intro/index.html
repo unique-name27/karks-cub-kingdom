@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Karks Cub Kingdom</title>
 <style>
-  html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;}
+  html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;touch-action:none;overscroll-behavior:none;-webkit-tap-highlight-color:transparent;}
   #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;}
-  #c{background:#000;image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;}
+  #c{background:#000;image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;touch-action:none;overscroll-behavior:none;-webkit-tap-highlight-color:transparent;}
 </style>
 </head>
 <body>
@@ -40,11 +40,18 @@ const ctx = canvas.getContext('2d', { alpha:false });
    resets both the transform and imageSmoothingEnabled, so both are
    (re)applied here, every time, after sizing. */
 function fitCanvas(){
-  const cssScale = Math.max(1, Math.min(window.innerWidth / CW, window.innerHeight / CH));
+  // no floor of 1x -- phones are smaller than the 960x540 logical canvas, so
+  // it has to be allowed to scale DOWN to fit, not just up. But a hidden or
+  // just-restoring tab can report a 0-size viewport; a 0-scale canvas never
+  // recovers without a resize event, so fall back to 1x until real
+  // dimensions exist (the rAF loop also self-heals).
+  const rawScale = Math.min(window.innerWidth / CW, window.innerHeight / CH);
+  const cssScale = (isFinite(rawScale) && rawScale > 0.01) ? rawScale : 1;
   const cssW = Math.floor(CW*cssScale), cssH = Math.floor(CH*cssScale);
   canvas.style.width = cssW + 'px';
   canvas.style.height = cssH + 'px';
-  const dpr = window.devicePixelRatio || 1;
+  // cap the effective DPR at 2 once we're shrinking (cssScale<1)
+  const dpr = cssScale < 1 ? Math.min(2, window.devicePixelRatio||1) : (window.devicePixelRatio || 1);
   const bw = Math.max(1, Math.round(cssW*dpr));
   const scale = bw / CW;
   const bh = Math.max(1, Math.round(CH*scale));
@@ -54,7 +61,12 @@ function fitCanvas(){
   ctx.imageSmoothingEnabled = false;
 }
 window.addEventListener('resize', fitCanvas);
+window.addEventListener('orientationchange', fitCanvas);
 fitCanvas();
+
+/* ---------------- mobile / touch ---------------- */
+let isTouch = ('ontouchstart' in window);
+let rotatePromptActive = false;
 
 /* ---------------- assets ---------------- */
 const imgTown = new Image();
@@ -1234,8 +1246,11 @@ function drawScene5(ctx, localT, se){
   drawReadingTextOutlined(ctx, 'FOR FREE?', CW/2, 324, 20, PAL.cream, '#000000', 'center');
   const blinkOn = Math.floor(localT)%2===0;
   if(blinkOn) drawReadingTextOutlined(ctx, 'PRESS START', CW/2, 404, 26, PAL.cream, '#000000', 'center');
-  drawReadingTextOutlined(ctx, 'ARROWS / WASD -- MOVE      SPACE -- SAY IT / THROW', CW/2, 444, 17, PAL.cream, '#000000', 'center');
-  drawReadingTextOutlined(ctx, 'GAMEPAD WORKS TOO', CW/2, 478, 15, PAL.cream, '#000000', 'center');
+  const controlsLine = isTouch
+    ? 'DRAG LEFT SIDE -- MOVE      TAP RIGHT SIDE -- SAY IT / THROW'
+    : 'ARROWS / WASD -- MOVE      SPACE -- SAY IT / THROW';
+  drawReadingTextOutlined(ctx, controlsLine, CW/2, 444, 17, PAL.cream, '#000000', 'center');
+  if(!isTouch) drawReadingTextOutlined(ctx, 'GAMEPAD WORKS TOO', CW/2, 478, 15, PAL.cream, '#000000', 'center');
   drawReadingTextOutlined(ctx, 'A DINNER PARTY LEGEND · KENNEY ASSETS · CC0', CW/2, 512, 12, PAL.cream, '#000000', 'center');
 }
 function drawBoot(nowMs){
@@ -1323,18 +1338,22 @@ function triggerReplay(){
   sceneClockOffset = trueElapsed();
 }
 window.addEventListener('keydown', (e)=>{
+  if(rotatePromptActive) return;
   lastInputTime = performance.now();
   if(state==='boot'){ triggerBoot(); return; }
   if(e.code==='Enter' || e.code==='Escape' || e.code==='Space' || e.key==='Enter' || e.key==='Escape' || e.key===' '){
     triggerSkip();
   }
 });
-window.addEventListener('pointerdown', ()=>{
+window.addEventListener('pointerdown', (e)=>{
+  if(e.pointerType==='touch') isTouch = true; // confirmed by an actual touch
+  if(rotatePromptActive) return;
   lastInputTime = performance.now();
   if(state==='boot'){ triggerBoot(); return; }
   triggerSkip();
 });
 function pollGamepad(){
+  if(rotatePromptActive) return;
   if(!navigator.getGamepads) return;
   let pads;
   try{ pads = navigator.getGamepads(); } catch(err){ return; }
@@ -1349,6 +1368,24 @@ function pollGamepad(){
     if(state==='boot') triggerBoot(); else triggerSkip();
   }
   gpPrevPressed = pressed;
+}
+/* lightweight full-screen "turn your phone" gate, matching the card-overlay
+   visual language used elsewhere in the project. Blocks input (see the
+   keydown/pointerdown/pollGamepad guards above) until landscape returns. */
+function drawRotatePrompt(ctx){
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,CW,CH);
+  ctx.restore();
+  const w = 680, h = 220;
+  const x = CW/2-w/2, y = CH/2-h/2;
+  ctx.fillStyle = PAL.cream; ctx.fillRect(x-4,y-4,w+8,h+8);
+  ctx.fillStyle = '#1a1410'; ctx.fillRect(x,y,w,h);
+  drawReadingTextOutlined(ctx, 'ROTATE YOUR PHONE', CW/2, y+56, 26, PAL.gold, PAL.outline, 'center');
+  if(Math.floor(performance.now()/500)%2===0){
+    drawReadingTextOutlined(ctx, 'TURN TO LANDSCAPE TO PLAY', CW/2, y+140, 16, PAL.cream, '#000000', 'center');
+  }
 }
 function startRecording(){
   try{
@@ -1387,12 +1424,36 @@ function updateAndDrawScene(n, localT, se){
   else if(n===4) drawScene4(ctx, localT, se);
   else drawScene5(ctx, localT, se);
 }
+let rotateFrozenSE = null; // scene-elapsed value captured at the instant the rotate prompt appears
 function frame(nowMs){
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (nowMs-lastFrame)/1000);
   lastFrame = nowMs;
+  // self-heal a canvas that was sized while the viewport reported 0x0
+  if(window.innerWidth > 0 && window.innerHeight > 0 && Math.abs(parseInt(canvas.style.width||'0') - Math.floor(CW*Math.min(window.innerWidth/CW, window.innerHeight/CH))) > 2){
+    fitCanvas();
+  }
   updateStars(dt);
   if(state==='boot'){ drawBoot(nowMs); return; }
+  rotatePromptActive = isTouch && window.innerHeight > window.innerWidth;
+  if(rotatePromptActive){
+    // audio-clock-driven timeline can't just "skip an update call" the way
+    // the game's frame-accumulated gameT can -- instead hold the scene at
+    // whatever se it was at the moment we froze, so it visually stays put
+    if(rotateFrozenSE===null) rotateFrozenSE = sceneElapsedNow();
+    const se = rotateFrozenSE;
+    const n = sceneNumFor(se);
+    if(n !== prevSceneNum){ enterScene(n); prevSceneNum = n; }
+    const localT = se - sceneLocalStart(n);
+    updateAndDrawScene(n, localT, se);
+    drawRotatePrompt(ctx);
+    return;
+  } else if(rotateFrozenSE!==null){
+    // back to landscape -- shift the timeline forward by exactly however
+    // long we were frozen, so playback resumes right where it paused
+    sceneClockOffset = trueElapsed() - rotateFrozenSE;
+    rotateFrozenSE = null;
+  }
   pollGamepad();
   const se = sceneElapsedNow();
   const n = sceneNumFor(se);

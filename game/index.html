@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Karks Cub Kingdom -- Playable Demo</title>
 <style>
-  html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;}
+  html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;touch-action:none;overscroll-behavior:none;-webkit-tap-highlight-color:transparent;}
   #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;}
-  #c{background:#000;image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;}
+  #c{background:#000;image-rendering:pixelated;image-rendering:-moz-crisp-edges;image-rendering:crisp-edges;touch-action:none;overscroll-behavior:none;-webkit-tap-highlight-color:transparent;}
 </style>
 </head>
 <body>
@@ -43,11 +43,20 @@ const ctx = canvas.getContext('2d', { alpha:false });
    resets both the transform and imageSmoothingEnabled, so both are
    (re)applied here, every time, after sizing. */
 function fitCanvas(){
-  const cssScale = Math.max(1, Math.min(window.innerWidth / CW, window.innerHeight / CH));
+  // no floor of 1x -- phones are smaller than the 960x540 logical canvas, so
+  // it has to be allowed to scale DOWN to fit, not just up. But a hidden or
+  // just-restoring tab can report a 0-size viewport; a 0-scale canvas never
+  // recovers without a resize event, so fall back to 1x until real
+  // dimensions exist (frame() also self-heals, see the main loop).
+  const rawScale = Math.min(window.innerWidth / CW, window.innerHeight / CH);
+  const cssScale = (isFinite(rawScale) && rawScale > 0.01) ? rawScale : 1;
   const cssW = Math.floor(CW*cssScale), cssH = Math.floor(CH*cssScale);
   canvas.style.width = cssW + 'px';
   canvas.style.height = cssH + 'px';
-  const dpr = window.devicePixelRatio || 1;
+  // cap the effective DPR at 2 once we're shrinking (cssScale<1) -- a 3x
+  // phone at sub-1x CSS scale doesn't need a full 3x backing store, that's
+  // pure wasted fill-rate/memory with no visible sharpness benefit
+  const dpr = cssScale < 1 ? Math.min(2, window.devicePixelRatio||1) : (window.devicePixelRatio || 1);
   const bw = Math.max(1, Math.round(cssW*dpr));
   const scale = bw / CW;
   const bh = Math.max(1, Math.round(CH*scale));
@@ -57,6 +66,7 @@ function fitCanvas(){
   ctx.imageSmoothingEnabled = false;
 }
 window.addEventListener('resize', fitCanvas);
+window.addEventListener('orientationchange', fitCanvas);
 fitCanvas();
 
 /* ---------------- assets (reused from ../intro/assets/) ---------------- */
@@ -1587,9 +1597,17 @@ let flashAlpha = 0;
 
 /* start-of-play controls hint: visible until the player has both moved and
    pressed action at least once (or 10s, whichever first), then fades 0.5s. */
-const CONTROLS_HINT_TEXT = 'ARROWS/WASD: MOVE   SPACE: SAY IT / THROW';
+const CONTROLS_HINT_TEXT_KB = 'ARROWS/WASD: MOVE   SPACE: SAY IT / THROW';
+const CONTROLS_HINT_TEXT_TOUCH = 'DRAG LEFT SIDE -- MOVE      TAP RIGHT SIDE -- SAY IT / THROW';
+function controlsHintText(){ return isTouch ? CONTROLS_HINT_TEXT_TOUCH : CONTROLS_HINT_TEXT_KB; }
 let hasMovedOnce = false, hasActionedOnce = false;
 let controlsHintAlpha = 1;
+
+/* ---------------- mobile / touch ---------------- */
+// initial hint from feature detection; confirmed (and locked in) the moment
+// a real touch pointerdown fires -- see the pointerdown listener below
+let isTouch = ('ontouchstart' in window);
+let rotatePromptActive = false;
 
 function updateTypewriterAudio(tw, t, onLineDone){
   const state = tw.getState(t);
@@ -2028,6 +2046,25 @@ const PLAYER_SPEED = 220;
 const keys = Object.create(null);
 let gpAPrev = false, gpDpadPrev = false;
 
+/* ---------------- floating joystick (touch, left half of screen) ----------------
+   pointerdown on the left half anchors the base at the touch point; drag
+   offset (in LOGICAL 960x540 coords, same space everything else draws in)
+   becomes a move vector once past the deadzone, saturating at JOY_SATURATION.
+   touchMoveVector() always returns a properly-normalized direction (dividing
+   by the raw drag distance first, then scaling by magnitude) so diagonal
+   drags come out unit-length just like keyboard/gamepad diagonals do. */
+let touchJoystick = { active:false, pointerId:null, baseX:0, baseY:0, curX:0, curY:0 };
+const JOY_DEADZONE = 10, JOY_SATURATION = 48;
+function touchMoveVector(){
+  if(!touchJoystick.active) return {dx:0, dy:0};
+  const dx = touchJoystick.curX-touchJoystick.baseX, dy = touchJoystick.curY-touchJoystick.baseY;
+  const dist = Math.hypot(dx,dy);
+  if(dist < JOY_DEADZONE) return {dx:0, dy:0};
+  const eff = Math.min(dist, JOY_SATURATION) - JOY_DEADZONE;
+  const mag = eff / (JOY_SATURATION-JOY_DEADZONE); // 0..1
+  return { dx:(dx/dist)*mag, dy:(dy/dist)*mag };
+}
+
 function getMoveVector(){
   let dx=0, dy=0;
   if(keys['KeyW']||keys['ArrowUp']) dy -= 1;
@@ -2048,11 +2085,14 @@ function getMoveVector(){
       if(gp.buttons[15] && gp.buttons[15].pressed) dx += 1;
     }
   }
+  const tv = touchMoveVector();
+  dx += tv.dx; dy += tv.dy;
   const len = Math.hypot(dx,dy);
   if(len>1){ dx/=len; dy/=len; }
   return {dx,dy};
 }
 function pollGamepadAction(){
+  if(rotatePromptActive) return;
   if(!navigator.getGamepads) return;
   let pads = [];
   try{ pads = navigator.getGamepads(); }catch(e){ return; }
@@ -2619,6 +2659,7 @@ function ensureAudioStarted(){
   if(actx.state==='suspended' && actx.resume) actx.resume();
 }
 function handleAction(){
+  if(rotatePromptActive) return; // frozen until the phone is turned to landscape
   if(modeSelectPending) return; // Space is handled by the mode-select keydown branch instead
   hasActionedOnce = true;
   ensureAudioStarted();
@@ -2684,7 +2725,7 @@ function drawControlsHint(ctx){
   if(controlsHintAlpha<=0) return;
   ctx.save();
   ctx.globalAlpha = controlsHintAlpha;
-  drawReadingTextOutlined(ctx, CONTROLS_HINT_TEXT, CW/2, CH-38, 16, PAL.cream, '#000000', 'center');
+  drawReadingTextOutlined(ctx, controlsHintText(), CW/2, CH-38, 16, PAL.cream, '#000000', 'center');
   ctx.restore();
 }
 function drawExclaimPrompt(ctx, x, y, t){
@@ -3033,7 +3074,7 @@ function drawPhaseRetryCard(ctx){
   ctx.save(); ctx.globalAlpha=0.55; ctx.fillStyle='#000'; ctx.fillRect(0,0,CW,CH); ctx.restore();
   if(Math.floor(phaseElapsed*2)%2===0) drawChunkyText(ctx, 'TRY AGAIN', CW/2, CH/2, 30, PAL.gold, PAL.outline, 'center');
   // static (non-fading) reminder under the blinking prompt
-  drawReadingTextOutlined(ctx, CONTROLS_HINT_TEXT, CW/2, CH/2+58, 16, PAL.cream, '#000000', 'center');
+  drawReadingTextOutlined(ctx, controlsHintText(), CW/2, CH/2+58, 16, PAL.cream, '#000000', 'center');
 }
 
 function draw(){
@@ -3070,6 +3111,7 @@ function draw(){
   ctx.restore();
   if(phase!=='endcard' && phase!=='losecard') drawHUD(ctx);
   if(phase!=='capture' && phase!=='endcard' && phase!=='losecard') drawControlsHint(ctx);
+  if(isTouch) drawJoystick(ctx); // no-op when no drag is active (see drawJoystick)
   if(flashAlpha>0){
     ctx.save(); ctx.globalAlpha=flashAlpha; ctx.fillStyle='#fff8ea'; ctx.fillRect(0,0,CW,CH); ctx.restore();
   }
@@ -3131,28 +3173,80 @@ const MODE_SELECT_ROWS = [
   'FIRST SEATING  --  A NICE DINNER',
   'SECOND SEATING  --  MUCH HARDER. YOU CAN LOSE.'
 ];
+const MODE_SELECT_W = 620, MODE_SELECT_H = 210;
+/* shared by draw and touch hit-testing so the two can never drift apart */
+function modeSelectRowRect(i){
+  const x = CW/2-MODE_SELECT_W/2, y = CH/2-MODE_SELECT_H/2;
+  const ry = y+82 + i*38;
+  return { x:x+16, y:ry-6, w:MODE_SELECT_W-32, h:28, textX:x+28, textY:ry, starX:x+MODE_SELECT_W-46 };
+}
 function drawModeSelectOverlay(ctx){
   ctx.save();
   ctx.globalAlpha = 0.55;
   ctx.fillStyle = '#000';
   ctx.fillRect(0,0,CW,CH);
   ctx.restore();
-  const w = 620, h = 210;
+  const w = MODE_SELECT_W, h = MODE_SELECT_H;
   const x = CW/2-w/2, y = CH/2-h/2;
   ctx.fillStyle = PAL.cream; ctx.fillRect(x-4,y-4,w+8,h+8);
   ctx.fillStyle = '#1a1410'; ctx.fillRect(x,y,w,h);
   drawChunkyText(ctx, 'CHOOSE YOUR SEATING', CW/2, y+20, 20, PAL.gold, PAL.outline, 'center');
-  let ry = y+82;
   for(let i=0;i<MODE_SELECT_ROWS.length;i++){
     const selected = modeSelectIndex===i;
+    const r = modeSelectRowRect(i);
     if(selected && Math.floor(cardT*2)%2===0){
-      ctx.save(); ctx.fillStyle = 'rgba(232,184,75,0.25)'; ctx.fillRect(x+16, ry-6, w-32, 28); ctx.restore();
+      ctx.save(); ctx.fillStyle = 'rgba(232,184,75,0.25)'; ctx.fillRect(r.x, r.y, r.w, r.h); ctx.restore();
     }
-    drawReadingText(ctx, (selected?'> ':'  ')+MODE_SELECT_ROWS[i], x+28, ry, 15, selected?PAL.gold:PAL.cream, 'left');
-    if(i===1 && hardCleared) drawStarIcon(ctx, x+w-46, ry-1, true, 4);
-    ry += 38;
+    drawReadingText(ctx, (selected?'> ':'  ')+MODE_SELECT_ROWS[i], r.textX, r.textY, 15, selected?PAL.gold:PAL.cream, 'left');
+    if(i===1 && hardCleared) drawStarIcon(ctx, r.starX, r.textY-1, true, 4);
   }
-  drawReadingText(ctx, 'ARROWS/WASD: CHOOSE   SPACE: CONFIRM', CW/2, y+h-28, 13, PAL.cream, 'center');
+  const hint = isTouch ? 'TAP TO CHOOSE   TAP AGAIN TO CONFIRM' : 'ARROWS/WASD: CHOOSE   SPACE: CONFIRM';
+  drawReadingText(ctx, hint, CW/2, y+h-28, 13, PAL.cream, 'center');
+}
+/* touch hit-test for the mode-select rows -- tapping the already-highlighted
+   row confirms, tapping any other row just moves the highlight to it */
+function handleModeSelectTouch(p){
+  for(let i=0;i<MODE_SELECT_ROWS.length;i++){
+    const r = modeSelectRowRect(i);
+    if(p.x>=r.x && p.x<=r.x+r.w && p.y>=r.y && p.y<=r.y+r.h){
+      if(modeSelectIndex===i) confirmModeSelect();
+      else { modeSelectIndex = i; if(actx) playBeep(actx.currentTime); }
+      return;
+    }
+  }
+}
+/* full-screen "turn your phone" gate -- same visual language as the card
+   overlays, blocks all input (see handleAction/pollGamepadAction/pointerdown)
+   until the device goes back to landscape */
+function drawRotatePrompt(ctx){
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0,0,CW,CH);
+  ctx.restore();
+  const w = 680, h = 240;
+  const x = CW/2-w/2, y = CH/2-h/2;
+  ctx.fillStyle = PAL.cream; ctx.fillRect(x-4,y-4,w+8,h+8);
+  ctx.fillStyle = '#1a1410'; ctx.fillRect(x,y,w,h);
+  drawChunkyText(ctx, 'ROTATE YOUR PHONE', CW/2, y+60, 26, PAL.gold, PAL.outline, 'center');
+  if(Math.floor(cardT*2)%2===0){
+    drawReadingText(ctx, 'TURN TO LANDSCAPE TO PLAY', CW/2, y+150, 16, PAL.cream, 'center');
+  }
+}
+/* ---------------- floating joystick visual (touch only) ---------------- */
+function drawJoystick(ctx){
+  if(!touchJoystick.active) return;
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  drawPixelCircle(ctx, touchJoystick.baseX, touchJoystick.baseY, JOY_SATURATION, PAL.cream, 3);
+  ctx.restore();
+  const v = touchMoveVector();
+  const nubX = touchJoystick.baseX + v.dx*JOY_SATURATION;
+  const nubY = touchJoystick.baseY + v.dy*JOY_SATURATION;
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+  drawPixelCircle(ctx, nubX, nubY, 16, PAL.gold, 3);
+  ctx.restore();
 }
 
 /* ======================================================================
@@ -3162,6 +3256,7 @@ const MODE_SELECT_KEYS = new Set(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'
 window.addEventListener('keydown', (e)=>{
   keys[e.code] = true;
   ensureAudioStarted();
+  if(rotatePromptActive) return; // frozen until landscape
   if(modeSelectPending){
     if(!e.repeat && MODE_SELECT_KEYS.has(e.code)){
       modeSelectIndex = 1-modeSelectIndex;
@@ -3173,8 +3268,60 @@ window.addEventListener('keydown', (e)=>{
   if(e.code==='Space' && !e.repeat){ handleAction(); e.preventDefault(); }
 });
 window.addEventListener('keyup', (e)=>{ keys[e.code] = false; });
-window.addEventListener('pointerdown', ()=>{ handleAction(); });
+
+/* maps a pointer event's viewport coordinates into the same 960x540 logical
+   space fitCanvas() draws into, via the canvas's own layout box -- stays
+   correct regardless of the exact CSS scale/centering fitCanvas computed. */
+function screenToLogical(clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (clientX-rect.left)/rect.width*CW,
+    y: (clientY-rect.top)/rect.height*CH
+  };
+}
+/* pointer-type-aware routing: mouse keeps today's "any click = action"
+   behavior; touch is zoned (left half = floating joystick, right half =
+   action) during actual gameplay, but ANY tap dismisses cards / lose / end
+   cards, same as it always could, since there's no joystick-relevant
+   gameplay happening on those screens. */
+window.addEventListener('pointerdown', (e)=>{
+  if(e.pointerType!=='touch'){ handleAction(); return; }
+  isTouch = true; // confirmed by an actual touch, not just the 'ontouchstart' hint
+  ensureAudioStarted();
+  if(rotatePromptActive) return;
+  const p = screenToLogical(e.clientX, e.clientY);
+  if(modeSelectPending){ handleModeSelectTouch(p); return; }
+  if(activeCard || phase==='endcard' || phase==='losecard' || phase==='retrycard' || phase==='gameover'){
+    handleAction();
+    return;
+  }
+  if(p.x < CW/2){
+    touchJoystick.active = true;
+    touchJoystick.pointerId = e.pointerId;
+    touchJoystick.baseX = p.x; touchJoystick.baseY = p.y;
+    touchJoystick.curX = p.x; touchJoystick.curY = p.y;
+  } else {
+    touchActionPointerId = e.pointerId;
+    handleAction();
+  }
+});
+window.addEventListener('pointermove', (e)=>{
+  if(e.pointerType==='touch' && touchJoystick.active && e.pointerId===touchJoystick.pointerId){
+    const p = screenToLogical(e.clientX, e.clientY);
+    touchJoystick.curX = p.x; touchJoystick.curY = p.y;
+  }
+});
+function releaseTouchPointer(e){
+  if(touchJoystick.active && e.pointerId===touchJoystick.pointerId){
+    touchJoystick.active = false; touchJoystick.pointerId = null;
+  }
+  if(touchActionPointerId===e.pointerId) touchActionPointerId = null;
+}
+window.addEventListener('pointerup', releaseTouchPointer);
+window.addEventListener('pointercancel', releaseTouchPointer);
 window.addEventListener('load', ()=>{ try{ ensureAudioStarted(); }catch(e){} });
+
+let touchActionPointerId = null;
 
 enterPhase('story'); // populate phaseData.tw for the very first frame
 if(hasBeatenBefore){
@@ -3191,15 +3338,21 @@ function frame(nowMs){
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (nowMs-lastFrameMs)/1000);
   lastFrameMs = nowMs;
+  rotatePromptActive = isTouch && window.innerHeight > window.innerWidth;
+  // self-heal a canvas that was sized while the viewport reported 0x0
+  if(window.innerWidth > 0 && Math.abs(parseInt(canvas.style.width||'0') - Math.floor(CW*Math.min(window.innerWidth/CW, window.innerHeight/CH))) > 2 && window.innerHeight > 0){
+    fitCanvas();
+  }
   pollGamepadAction();
-  if(modeSelectPending || activeCard){
-    cardT += dt; // independent clock so the card's/menu's own blink keeps animating
+  if(rotatePromptActive || modeSelectPending || activeCard){
+    cardT += dt; // independent clock so the card's/menu's/prompt's own blink keeps animating
   } else {
     gameT += dt;
     update(dt);
   }
   draw();
-  if(modeSelectPending) drawModeSelectOverlay(ctx);
+  if(rotatePromptActive) drawRotatePrompt(ctx);
+  else if(modeSelectPending) drawModeSelectOverlay(ctx);
   else if(activeCard) drawCardOverlay(ctx);
   if(actx) schedulerTick();
 }

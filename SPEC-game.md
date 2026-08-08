@@ -288,6 +288,41 @@ Unlockable, offered after beating the game once, genuinely losable.
 - **Hard-mode win**: the end card shows an extra gold line
   `SECOND SEATING CLEARED` and sets `localStorage['kck_hard_cleared']='1'`.
 
+### Mobile
+
+Both `intro/index.html` and `game/index.html` are touch-playable. `fitCanvas()`
+no longer floors the CSS scale at 1× — it shrinks the 960×540 logical canvas
+to fit a phone viewport (capping the effective backing-store DPR at 2 once
+it's shrinking, so a 3×-DPR phone doesn't pay for a needlessly huge backing
+store). The viewport meta disables pinch/double-tap zoom; `touch-action:none`
++ `overscroll-behavior:none` stop scroll/bounce gestures from fighting the
+game. `isTouch` starts as an `'ontouchstart' in window` hint and is confirmed
+(and locked in) by the first real `pointerdown` with `pointerType==='touch'`.
+
+**Rotate prompt**: on a touch device in portrait, a full-screen "ROTATE YOUR
+PHONE" overlay (same visual language as the tutorial cards) blocks input and
+freezes the game/cinematic — the game reuses its existing card-freeze branch
+in `frame()`; the intro (which is driven by the audio clock, not a frame-
+accumulated timer) instead holds the scene at its `sceneElapsedNow()` value
+from the moment it froze, then shifts `sceneClockOffset` by the frozen
+duration on resume so playback picks up exactly where it paused. Both resume
+automatically the instant the device goes back to landscape.
+
+**Touch input (game only)**: a floating joystick — pointerdown on the left
+half of the screen anchors it at the touch point; the drag vector (10px
+deadzone, saturating at 48px, direction-normalized so diagonals aren't
+faster) merges into `getMoveVector()` alongside keyboard/gamepad. The right
+half is the action button (`handleAction()`); any tap dismisses tutorial/
+lose/end cards regardless of side, since there's no joystick-relevant
+gameplay on those screens. Routing is pointer-type-aware (mouse keeps the
+old "any click = action" behavior) and tracks `pointerId`s individually, so
+the joystick and the action button work simultaneously under real multi-
+touch. The hard-mode seating card is tap-to-highlight / tap-again-to-confirm,
+mapped through the same client→logical-960×540 transform `fitCanvas()`
+establishes. On touch, control hints everywhere become `DRAG LEFT SIDE --
+MOVE   TAP RIGHT SIDE -- SAY IT / THROW` and the `GAMEPAD WORKS TOO` line
+is hidden.
+
 ### Acceptance checklist
 
 - [ ] No text anywhere mentions cost/money/bills/"nothing" (grep the file for COIN, BILL, COST, NOTHING, FREE — only "FOR FREE?" may match FREE)
@@ -301,4 +336,5 @@ Unlockable, offered after beating the game once, genuinely losable.
 - [ ] Game over path works and TRY AGAIN restarts the beat it failed in (Beat 2 or Beat 4)
 - [ ] Real mp3 soundtrack plays through musicGain with ducking intact, chiptune SFX unaffected, automatic silent-safe fallback if the track can't load
 - [ ] Hard mode: unlocks on any win, mode-select card gates it correctly, every DIFF constant resolves to its normal value when hardMode is false (byte-identical to pre-hard-mode behavior) and its hard value when true, losing in hard mode always goes to the lose card (never the retry card), hard win sets kck_hard_cleared
+- [ ] Mobile: canvas fits a phone viewport in landscape with no crop; rotate prompt blocks/freezes in portrait and resumes in landscape; joystick drag and action-zone tap work simultaneously via independent pointerIds; desktop mouse/keyboard behavior is unaffected (no joystick drawn, no zoning) when isTouch is false
 - [ ] Intro edits applied (new Scene 1 lines, marbled line, PRESS START → ../game/)

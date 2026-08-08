@@ -2,6 +2,10 @@
 
 **▶ Play it: https://unique-name27.github.io/karks-cub-kingdom/**
 
+Plays on phones too — open the link in landscape (portrait shows a rotate
+prompt); movement is a floating joystick on the left half of the screen, tap
+the right half for the action button.
+
 A Zelda-style (SNES-era) comedy game where the player is Chef Gabe, whose only
 weapon is the punchline "FOR FREE?". The repo has two pieces:
 
