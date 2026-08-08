@@ -1469,18 +1469,20 @@ const CRITIQUE_LINES = [
   ['I’VE HEARD THIS STORY TWICE.'],
   ['GOOD THING HE BOUGHT ALL THE','BASEBALLS AT THE GAME.']
 ];
-/* wine-snob insults, cycled in order each time the chef throws a riesling.
-   Lines pre-checked clean against the tone/grep gate in SPEC-game.md's
-   acceptance checklist. */
-const WINE_INSULTS = [
-  'TOO SWEET.',
-  'OFF-VINTAGE.',
-  'GAS STATION TERROIR.',
-  'SERVED WARM. LIKE A SOUP.',
-  'A SCREW-TOP YEAR.',
-  'IT PAIRS WITH REGRET.'
+/* the CRITIC's throw-reaction insults, aimed at Gabe -- he snarks whether he
+   ducks the bottle or eats it. Cycled in order. Lines pre-checked clean
+   against the tone/grep gate in SPEC-game.md's acceptance checklist. */
+const CRITIC_DUCK_LINES = [
+  'TOO SLOW, GABE.',
+  'PREDICTABLE.',
+  'I REVIEWED THAT THROW. ONE STAR.'
 ];
-let wineInsultIndex = 0;
+const CRITIC_HIT_LINES = [
+  'OW. LUCKY.',
+  'THAT WAS THE HOUSE RIESLING.',
+  'MY GLASSES. YOU HIT MY GLASSES.'
+];
+let criticDuckIndex = 0, criticHitIndex = 0;
 let playerBubble = null; // {text, born} -- small bubble over the chef's head
 
 let player = { x:PLAYER_SPAWN.x, y:PLAYER_SPAWN.y, facing:'down', walkAnimT:0, hearts:6, maxHearts:12, hasBottle:false, iframes:0, canMove:true, vx:0, vy:0 };
@@ -1754,18 +1756,27 @@ function throwBottle(){
   const ducked = canDuck && Math.random()<0.25;
   spawnBottleThrow(player.x, player.y-16, boss.x, boss.y, duration);
   bottles[bottles.length-1].willHit = !ducked;
-  if(ducked){ boss.duckT = duration*0.6; if(actx) playWhoosh(actx.currentTime); }
-  // the chef can't resist a wine-snob insult on every throw -- doesn't block
-  // movement or the next throw, just a small bubble over his head
-  const line = WINE_INSULTS[wineInsultIndex % WINE_INSULTS.length];
-  wineInsultIndex++;
-  playerBubble = { text: line, born: gameT };
-  if(speechWorked===true) speakLine(line, 1.05, 0.7);
+  if(ducked){
+    boss.duckT = duration*0.6;
+    if(actx) playWhoosh(actx.currentTime);
+    // the critic can't resist rubbing it in -- insult aimed at Gabe, not the wine
+    const line = CRITIC_DUCK_LINES[criticDuckIndex % CRITIC_DUCK_LINES.length];
+    criticDuckIndex++;
+    boss.bubble = { text: [line], born: gameT };
+    speakCritique(line);
+  }
 }
 function checkBossHit(){
   boss.hp = Math.max(0, boss.hp-1);
   stats.bottlesLanded++;
   boss.recoilT = 0.3;
+  if(boss.hp>0){
+    // he takes the hit and insults Gabe anyway
+    const line = CRITIC_HIT_LINES[criticHitIndex % CRITIC_HIT_LINES.length];
+    criticHitIndex++;
+    boss.bubble = { text: [line], born: gameT };
+    speakCritique(line);
+  }
   if(boss.hp<=0){
     if(!boss.fakeDeathDone){
       boss.fakeDeathDone = true;
