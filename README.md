@@ -6,6 +6,12 @@ Plays on phones too — open the link in landscape (portrait shows a rotate
 prompt); movement is a floating joystick on the left half of the screen, tap
 the right half for the action button.
 
+Jump straight to a later part of the game via `game/?start=<value>` —
+`dinner` (default), `boss` (skip to the critic fight), `aram` (skip to the
+chase), `ending` (skip to Aram turning good, then the celebration/epilogues/
+Beat 5 play out normally), or `techsupport` (skip straight to Beat 5); an
+invalid or missing value falls back to `dinner`.
+
 A Zelda-style (SNES-era) comedy game where the player is Chef Gabe, whose only
 weapon is the punchline "FOR FREE?". The repo has two pieces:
 

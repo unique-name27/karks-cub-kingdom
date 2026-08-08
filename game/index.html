@@ -1794,7 +1794,7 @@ function confirmModeSelect(){
     enterPhase('story');
   }
   modeSelectPending = false;
-  maybeShowCard('start');
+  applyStartParam();
 }
 
 let gameT = 0;
@@ -3907,14 +3907,119 @@ window.addEventListener('load', ()=>{ try{ ensureAudioStarted(); }catch(e){} });
 
 let touchActionPointerId = null;
 
+/* ======================================================================
+   URL ENTRY POINTS -- ?start=<dinner|boss|aram|ending|techsupport>
+   Jump straight into a later part of the game without playing the rest.
+   Each non-default entry is a proper state initializer (same idea as
+   retryBeat1/retryBeat2/retryBeat4): it sets every flag the target phase's
+   code expects -- boss/aram/woman/diner positions, which tutorial cards
+   have already "shown" so they don't fire mid-jump, drums/music state,
+   stats zeroed -- then calls enterPhase() to actually enter it. The jump is
+   applied AFTER mode-select confirms (mode-select still shows first if
+   kck_beaten is set), so hardMode/D() are always already resolved by the
+   time any of this runs. Invalid/missing values fall back to 'dinner',
+   which is byte-for-byte today's boot behavior (no code path change at all
+   for the default case). */
+const START_PARAM = (function(){
+  try{
+    const v = new URLSearchParams(location.search).get('start');
+    const valid = new Set(['dinner','boss','aram','ending','techsupport']);
+    return valid.has(v) ? v : 'dinner';
+  }catch(e){ return 'dinner'; }
+})();
+function resetStatsForEntryPoint(){
+  stats.heartsCaptured=0; stats.hitsTaken=0; stats.bottlesLanded=0; stats.tooSoon=0; stats.reviews=0; stats.resets=0;
+}
+/* shared "the boss fight already happened" setup for the aram/ending/
+   techsupport entries: critic retired into diner[CRITIC_INDEX]'s old seat,
+   boss revived and sitting in his window (not fighting -- HP bar/attack AI
+   stay off since state is 'revived', not 'active'), the woman already
+   arrived and delivered her lines. */
+function setupPostFightState(){
+  diners[CRITIC_INDEX].retired = true;
+  boss.visible = true;
+  boss.state = 'revived';
+  boss.hp = D('bossMaxHp'); boss.maxHp = D('bossMaxHp');
+  boss.x = BOSS_DOOR.x+BOSS_DOOR.w/2; boss.y = BOSS_DOOR.y+BOSS_DOOR.h*0.6;
+  boss.doorPopT = 1; boss.duckT = 0; boss.phase2 = false;
+  boss.transforming = false; boss.targetScale = 1.8;
+  boss.fakeDeathDone = true;
+  woman.active = true; woman.arrived = true; woman.x = 830; woman.y = 400;
+}
+function startAtBoss(){
+  resetStatsForEntryPoint();
+  player.hearts = player.maxHearts;
+  cardsShown.start = true; cardsShown.capture = true;
+  enterPhase('beat2_intro'); // critic walk-out -> transform -> enterPhase('boss') shows its card once
+}
+function startAtAram(){
+  resetStatsForEntryPoint();
+  setupPostFightState();
+  player.hearts = player.maxHearts;
+  cardsShown.start = true; cardsShown.capture = true; cardsShown.boss = true;
+  enterPhase('beat4_intro'); // dramatic staging -> beat4_chase shows the ARAM card once
+}
+/* the third five-star review just landed: Aram freezes mid-chase, checks his
+   phone, turns good, then flows naturally into celebration -> epilogueA ->
+   epilogueB -> beat5 -> end card, exactly like reaching this point by play. */
+function startAtEnding(){
+  resetStatsForEntryPoint();
+  setupPostFightState();
+  player.hearts = player.maxHearts;
+  aram.active = true; aram.turnedGood = false; aram.state = 'chase';
+  // both positioned on open floor, clear of the solid TABLE rect (336-624 x,
+  // 248-368 y) -- starting a mobile entity already overlapping a solid
+  // freezes it in place, since moveAndCollide reverts any delta that's still
+  // inside the same rect it started in
+  aram.x = 760; aram.y = 300;
+  player.x = 700; player.y = 450;
+  // scatter the 5 reviewer candidates around the room like a real completed
+  // chase, and mark exactly D('reviewsNeeded') of them as already reviewed
+  // (persistent star icon via reviewGiven, not the transient rising particle
+  // -- that was the moment of completion, this is a beat after it)
+  const need = D('reviewsNeeded');
+  const spots = [{x:300,y:180},{x:640,y:200},{x:300,y:420},{x:640,y:420},{x:480,y:460}];
+  getReviewerList().forEach((r,i)=>{
+    r.reviewGiven = i<need;
+    r.fleeing = false; r.begging = false; r.beggingT = 0;
+    r.x = spots[i%spots.length].x; r.y = spots[i%spots.length].y;
+    r.wanderTX = r.x; r.wanderTY = r.y;
+  });
+  stats.reviews = need;
+  cardsShown.start = true; cardsShown.capture = true; cardsShown.boss = true; cardsShown.aram = true;
+  drumsOn = true; harmonyOn = true; hatsSixteenths = true;
+  if(actx){ musicDir.droneOn = false; setMusicProgram(loopProgram('B'), 140); }
+  enterPhase('beat4_turngood');
+}
+function startAtTechSupport(){
+  resetStatsForEntryPoint();
+  setupPostFightState();
+  player.hearts = player.maxHearts;
+  aram.active = true; aram.turnedGood = true; aram.state = 'frozen';
+  aram.x = 480; aram.y = 300;
+  const need = D('reviewsNeeded');
+  getReviewerList().forEach(r=>{ r.reviewGiven = true; r.fleeing=false; r.begging=false; r.beggingT=0; });
+  stats.reviews = need;
+  cardsShown.start = true; cardsShown.capture = true; cardsShown.boss = true; cardsShown.aram = true;
+  enterPhase('beat5_chase'); // shows the TECH SUPPORT card once, room already in its post-win state
+}
+function applyStartParam(){
+  if(START_PARAM==='boss') startAtBoss();
+  else if(START_PARAM==='aram') startAtAram();
+  else if(START_PARAM==='ending') startAtEnding();
+  else if(START_PARAM==='techsupport') startAtTechSupport();
+  else maybeShowCard('start'); // 'dinner' -- today's exact default behavior
+}
+
 enterPhase('story'); // populate phaseData.tw for the very first frame
 if(hasBeatenBefore){
   // beaten before -- offer a seating choice before the usual DINNER IS
-  // SERVED card. Without the flag, boot exactly as before.
+  // SERVED card (or the URL entry point). Without the flag, boot exactly as
+  // before, except now branching on START_PARAM below.
   modeSelectPending = true;
   modeSelectIndex = 0; // default highlight: FIRST SEATING
 } else {
-  maybeShowCard('start'); // "DINNER IS SERVED" -- shown once, before round A's story
+  applyStartParam();
 }
 
 let lastFrameMs = performance.now();
