@@ -1,5 +1,7 @@
 # Karks Cub Kingdom
 
+**▶ Play it: https://unique-name27.github.io/karks-cub-kingdom/**
+
 A Zelda-style (SNES-era) comedy game where the player is Chef Gabe, whose only
 weapon is the punchline "FOR FREE?". The repo has two pieces:
 
