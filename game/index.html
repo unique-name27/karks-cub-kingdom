@@ -428,7 +428,7 @@ function initAudio(){
    either way since those aren't routed through the scheduler at all. */
 const MUSIC_TRACK_SRC = '../assets/music/theme.mp3';
 let bgmEl = null, bgmSource = null;
-let useMp3Music = false, bgmFallback = false, bgmPlayAttempts = 0, bgmNextRetryAt = 0;
+let useMp3Music = false, bgmFallback = false, bgmPlayAttempts = 0, bgmNextRetryAt = 0, bgmGraceUntil = 0;
 function initMusicTrack(){
   if(bgmEl || bgmFallback) return;
   try{
@@ -459,6 +459,11 @@ function startMusicTrack(){
   if(now < bgmNextRetryAt) return;
   bgmNextRetryAt = now + 3000;
   bgmPlayAttempts++;
+  // the grace window (chiptune held silent while the mp3 confirms) only
+  // matters on the FIRST attempt -- the silence-into-music moment; later
+  // retries happen with the chiptune already covering, where the handoff
+  // is a crossfade, not a leaked first note
+  if(bgmPlayAttempts === 1) bgmGraceUntil = now + 3000;
   try{
     if(bgmEl.error){ try{ bgmEl.load(); }catch(e){} } // recover a failed download before retrying
     const p = bgmEl.play();
@@ -855,7 +860,15 @@ function generateSectionEvents(name, startTime, beatDur, opts){
    sounded) whenever the real mp3 track is confirmed playing */
 const MUSIC_NOTE_TYPES_GAME = new Set(['lead','harmony','bass','kick','snare','hat','drone','arp','twang']);
 function dispatchEvent(ev, atTime){
-  if(useMp3Music && MUSIC_NOTE_TYPES_GAME.has(ev.type)) return;
+  if(MUSIC_NOTE_TYPES_GAME.has(ev.type)){
+    if(useMp3Music) return;
+    // grace window: while the mp3's fate is still being decided (its play()
+    // confirmation arrives a beat AFTER the scheduler unlocks), keep the
+    // chiptune silent so its first loud square-wave note doesn't leak out
+    // ahead of the real track. If the mp3 is slow or fails, the chiptune
+    // starts covering once the window lapses.
+    if(bgmEl && !bgmFallback && performance.now() < bgmGraceUntil) return;
+  }
   switch(ev.type){
     case 'lead': playLead(ev.note, atTime, ev.dur, ev.vibrato); break;
     case 'harmony': if(harmonyOn) playHarmony(ev.note, atTime, ev.dur); break;

@@ -528,7 +528,7 @@ function initAudio(){
    track. Falls back to the chiptune scheduler automatically on any failure. */
 const MUSIC_TRACK_SRC = '../assets/music/theme.mp3';
 let bgmEl = null, bgmSource = null;
-let useMp3Music = false, bgmFallback = false, bgmPlayAttempts = 0, bgmNextRetryAt = 0;
+let useMp3Music = false, bgmFallback = false, bgmPlayAttempts = 0, bgmNextRetryAt = 0, bgmGraceUntil = 0;
 function initMusicTrack(){
   if(bgmEl || bgmFallback) return;
   try{
@@ -553,6 +553,8 @@ function startMusicTrack(){
   if(now < bgmNextRetryAt) return;
   bgmNextRetryAt = now + 3000;
   bgmPlayAttempts++;
+  // grace only matters on the FIRST attempt (the silence-into-music moment)
+  if(bgmPlayAttempts === 1) bgmGraceUntil = now + 3000;
   try{
     if(bgmEl.error){ try{ bgmEl.load(); }catch(e){} } // recover a failed download before retrying
     const p = bgmEl.play();
@@ -845,7 +847,13 @@ function ensureGenerated(songTime, ahead){
 }
 const MUSIC_NOTE_TYPES_INTRO = new Set(['lead','harmony','bass','kick','snare','hat','drone','arp','twang']);
 function dispatchEvent(ev, atTime){
-  if(useMp3Music && MUSIC_NOTE_TYPES_INTRO.has(ev.type)) return;
+  if(MUSIC_NOTE_TYPES_INTRO.has(ev.type)){
+    if(useMp3Music) return;
+    // grace window: hold the chiptune silent while the mp3's play()
+    // confirmation is still in flight, so its first note doesn't leak out
+    // ahead of the real track (chiptune still covers if the mp3 is slow)
+    if(bgmEl && !bgmFallback && performance.now() < bgmGraceUntil) return;
+  }
   switch(ev.type){
     case 'lead': playLead(ev.note, atTime, ev.dur, ev.vibrato); break;
     case 'harmony': playHarmony(ev.note, atTime, ev.dur); break;
