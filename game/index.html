@@ -381,6 +381,43 @@ let actx = null, masterGain = null, compressor = null, musicGain = null, fxGain 
 let noiseBuffer = null;
 let drumsOn = false, harmonyOn = false, hatsSixteenths = false;
 
+/* ---------------- master volume ----------------
+   0..1, multiplied into masterGain (masterGain.gain = 0.8 * volumeSetting)
+   so every existing gain-staging/ducking downstream of it is untouched --
+   this just scales the final output. Persisted so the choice carries
+   between the intro and the game and across visits. */
+function loadVolumeSetting(){
+  try{
+    if(!window.localStorage) return 0.55;
+    const raw = localStorage.getItem('kck_volume');
+    if(raw===null) return 0.55;
+    const v = parseFloat(raw);
+    if(!isFinite(v) || v<0 || v>1) return 0.55;
+    return v;
+  }catch(e){ return 0.55; }
+}
+function saveVolumeSetting(v){
+  try{ if(window.localStorage) localStorage.setItem('kck_volume', String(v)); }catch(e){}
+}
+let volumeSetting = loadVolumeSetting();
+let volumeBeforeMute = volumeSetting>0 ? volumeSetting : 0.55;
+/* ramps into masterGain over ~80ms to avoid clicks; `immediate` skips the
+   ramp (used once at initAudio() time, where there's nothing to click from) */
+function applyMasterVolume(immediate){
+  if(!actx || !masterGain) return;
+  const target = 0.8 * volumeSetting;
+  const now = actx.currentTime;
+  masterGain.gain.cancelScheduledValues(now);
+  masterGain.gain.setValueAtTime(masterGain.gain.value, now);
+  if(immediate) masterGain.gain.setValueAtTime(target, now);
+  else masterGain.gain.linearRampToValueAtTime(target, now+0.08);
+}
+function setVolumeSetting(v){
+  volumeSetting = Math.max(0, Math.min(1, v));
+  saveVolumeSetting(volumeSetting);
+  applyMasterVolume(false);
+}
+
 function noteToFreq(note){
   const m = /^([A-G])(#?)(\d)$/.exec(note);
   if(!m) return 440;
@@ -407,7 +444,7 @@ function initAudio(){
   const nd = noiseBuffer.getChannelData(0);
   for(let i=0;i<nd.length;i++) nd[i] = (Math.random()*2-1);
   compressor = actx.createDynamicsCompressor();
-  masterGain = actx.createGain(); masterGain.gain.value = 0.8;
+  masterGain = actx.createGain(); masterGain.gain.value = 0.8 * volumeSetting;
   compressor.connect(masterGain);
   masterGain.connect(actx.destination);
   musicGain = actx.createGain(); musicGain.gain.value = 1.0;
@@ -1061,8 +1098,9 @@ const DINER_DEFS = [
   {col:3,row:8, x:400,y:432, flip:true},
   {col:2,row:8, x:560,y:432, flip:true}
 ];
-function drawDinerSprite(ctx, col, row, x, y, flip){
-  drawTile(ctx, rawTile(imgDungeon,col,row), x-32, y-64, 4, flip);
+function drawDinerSprite(ctx, col, row, x, y, flip, scale){
+  scale = scale===undefined ? 4 : scale;
+  drawTile(ctx, rawTile(imgDungeon,col,row), x-TILE*scale/2, y-TILE*scale, scale, flip);
 }
 function drawSeatedDiners(ctx, diners){
   for(let i=0;i<diners.length;i++){
@@ -1304,12 +1342,15 @@ function getMiniTitleCanvas(){
 /* speech synthesis -- feature-detected, silent fallback per spec */
 let speechWorked = null;
 function speakLine(text, rate, pitch){
+  // speechSynthesis doesn't route through WebAudio/masterGain at all -- mute
+  // means mute, so skip speaking entirely rather than speak silently
+  if(volumeSetting<=0) return false;
   if(!('speechSynthesis' in window)){ if(speechWorked===null) speechWorked=false; return false; }
   try{
     const voices = window.speechSynthesis.getVoices();
     if(!voices || voices.length===0){ if(speechWorked===null) speechWorked=false; return false; }
     const u = new SpeechSynthesisUtterance(text);
-    u.rate = rate; u.pitch = pitch; u.voice = voices[0];
+    u.rate = rate; u.pitch = pitch; u.voice = voices[0]; u.volume = volumeSetting;
     window.speechSynthesis.speak(u);
     speechWorked = true;
     return true;
@@ -1609,6 +1650,7 @@ function updateAndDrawParticles(ctx, dt, gameT){
    ====================================================================== */
 function lerp(a,b,t){ return a+(b-a)*t; }
 function clamp01(t){ return Math.max(0, Math.min(1, t)); }
+function easeInOut(t){ t = clamp01(t); return t*t*(3-2*t); }
 
 const ROUNDS = [
   { lines:['I DRANK A GLASS OF RIESLING','SO NOBODY ELSE HAD TO.'] },
@@ -1969,9 +2011,11 @@ function enterPhase(name){
     }
     if(speechWorked===true) speakForFree();
   } else if(name==='epilogueA'){
-    // THE BATHROOM: one seated diner steps away, has a small phone-related
-    // crisis, and the table laughs at him before he trudges back. Gameplay
-    // locked throughout -- pure cutscene.
+    // THE BATHROOM: one seated diner (bathroom guy -- diners[2]) steps away,
+    // opens his phone, and VISIBLY deletes his entire photo gallery (a
+    // 16-thumbnail grid that pops away a few at a time) before the table
+    // laughs at him and he trudges back. Gameplay locked throughout -- pure
+    // cutscene. Distinct from Epilogue B's diner (diners[3]).
     player.canMove = false;
     phaseData.stage = 0;
     phaseData.diner = diners[2];
@@ -1982,13 +2026,17 @@ function enterPhase(name){
     phaseData.startX = phaseData.diner.x; phaseData.startY = phaseData.diner.y;
     phaseData.doorX = BATHROOM_DOOR.x + BATHROOM_DOOR.w/2;
     phaseData.doorY = BATHROOM_DOOR.h + 40;
+    phaseData.puffs = [];
     if(actx) duckDown(actx.currentTime, 0.3);
   } else if(name==='epilogueB'){
-    // THE GUY WHO BUILT THIS: a letterboxed meta-joke cutaway (three shots:
-    // plane home, tiny room / desk / mini title on the screen, sharing with
-    // the 4 guys), then back to the dining room for Beat 5.
+    // THE GUY WHO BUILT THIS: a letterboxed 4-shot meta-joke cutaway (dining
+    // room beat, plane home, desk build-up, sharing with the 4 guys), then
+    // back to the dining room for Beat 5. diners[3] ("the builder guy") stars
+    // here AND is Beat 5's tech-support target -- that's the joke: the guy
+    // who built the game can't hear it either.
     player.canMove = false;
     phaseData.stage = 1;
+    phaseData.builder = diners[3];
     phaseData.lastKeyBlipAt = -999;
     phaseData.pingIndex = 0;
     if(actx) duckDown(actx.currentTime, 0.25);
@@ -2546,15 +2594,17 @@ function completeReview(r){
 
 /* ======================================================================
    BEAT 5 -- TECH SUPPORT (post-epilogue final level: pure comedy chase,
-   no damage/drain/death). Target is always diners[0] -- a fixed pick, not
-   stored in phaseData, so it survives enterPhase()'s phaseData reset
-   between 'beat5_chase' and 'beat5_resolve' without extra plumbing.
-   The wander/flee movement below is a deliberate copy+adapt of
+   no damage/drain/death). Target is always diners[3] -- the SAME "builder
+   guy" who starred in Epilogue B (the one who flew home and built this exact
+   game) -- that's the joke: he can't hear the sound in the game he built.
+   A fixed pick, not stored in phaseData, so it survives enterPhase()'s
+   phaseData reset between 'beat5_chase' and 'beat5_resolve' without extra
+   plumbing. The wander/flee movement below is a deliberate copy+adapt of
    updateReviewers' algorithm (same codebase convention as the duplicated
    audio engine) rather than a shared call, since the two have unrelated
    completion semantics (review-given vs. catch-count/reply-cycling).
    ====================================================================== */
-function beat5Target(){ return diners[0]; }
+function beat5Target(){ return diners[3]; }
 const TECH_SUPPORT_MID_REPLIES = ['WHAT?', "IT'S JUST BEEPING.", 'STILL NO SOUND.'];
 const TECH_SUPPORT_FINAL_REPLY = 'OH. IT WORKS NOW.';
 /* normal mode's 4 catches map 1:1 onto the 3 mid-replies + the final one;
@@ -2591,8 +2641,9 @@ function updateBeat5(dt){
       r.begging = false; r.replied = false; r.beggingT = 0;
     }
     // occasional idle bounce for the two bystanders while he's caught
+    // (0 and 2 -- not the boss seat, not diners[3] who's the target here)
     if(Math.random()<0.003){
-      const od = diners[Math.random()<0.5?2:3];
+      const od = diners[Math.random()<0.5?0:2];
       if(!od.walking && !od.retired && od.bounceT<=0) od.bounceT = 0.001;
     }
     return;
@@ -2625,9 +2676,9 @@ function updateBeat5(dt){
     phaseData.lastBubbleAt = gameT;
     r.bubble = { text: "I CAN'T HEAR THE MUSIC.", born: gameT };
   }
-  // occasional idle bounce for the two bystanders
+  // occasional idle bounce for the two bystanders (0 and 2 -- see above)
   if(Math.random()<0.003){
-    const od = diners[Math.random()<0.5?2:3];
+    const od = diners[Math.random()<0.5?0:2];
     if(!od.walking && !od.retired && od.bounceT<=0) od.bounceT = 0.001;
   }
 }
@@ -2955,6 +3006,9 @@ function updatePhase(dt){
       break;
     }
     case 'epilogueA': {
+      // stages: 0 walk to door -> 1 gallery pops in + "DELETE ALL?" -> 2 beat
+      // -> 3 thumbnails visibly vanish -> 4 "DELETED." (empty grid) -> 5
+      // "ALL MY PHOTOS." + shocked reaction -> 6 hold reaction -> 7 walk back
       const EP_A_WALK_DUR = 1.4;
       const d = phaseData.diner;
       if(phaseData.stage===0){
@@ -2963,6 +3017,7 @@ function updatePhase(dt){
         d.y = lerp(phaseData.startY, phaseData.doorY, t);
         if(t>=1){
           phaseData.stage = 1;
+          phaseData.galleryPopAt = phaseElapsed;
           phaseData.bubbleTw = makeTypewriter(['DELETE ALL?'], 12, 0.4);
           phaseData.bubbleStart = phaseElapsed;
         }
@@ -2971,22 +3026,47 @@ function updatePhase(dt){
         updateTypewriterAudio(phaseData.bubbleTw, local);
         if(local > phaseData.bubbleTw.doneAt + DIALOGUE_GAP){
           phaseData.stage = 2;
+          phaseData.beatAt = phaseElapsed;
+        }
+      } else if(phaseData.stage===2){
+        // "...beat..." before the thumbnails start popping away
+        if(phaseElapsed - phaseData.beatAt > 0.5){
+          phaseData.stage = 3;
+          phaseData.vanishAt = phaseElapsed;
+        }
+      } else if(phaseData.stage===3){
+        const local = phaseElapsed - phaseData.vanishAt;
+        const goneCount = epaGoneCount(local);
+        if(goneCount > (phaseData.lastGoneCount||0)){
+          const rect = epAPhoneRect(d);
+          const cols=4, gap=4, sw=rect.w-16, sh=rect.h-16;
+          const cellW=(sw-gap*(cols-1))/cols, cellH=(sh-gap*(3))/4;
+          for(let g=phaseData.lastGoneCount||0; g<goneCount; g++){
+            const idx = EPA_VANISH_ORDER[g];
+            const col = idx%cols, row = (idx/cols)|0;
+            const px = rect.x+8+col*(cellW+gap)+cellW/2, py = rect.y+8+row*(cellH+gap)+cellH/2;
+            phaseData.puffs.push({x:px, y:py, born:phaseElapsed});
+          }
+          phaseData.lastGoneCount = goneCount;
+        }
+        if(goneCount>=16 && local > 0.48+0.4){ // brief hold on the empty grid
+          phaseData.stage = 4;
           phaseData.bubbleTw = makeTypewriter(['DELETED.'], 12, 0.4);
           phaseData.bubbleStart = phaseElapsed;
         }
-      } else if(phaseData.stage===2){
+      } else if(phaseData.stage===4){
         const local = phaseElapsed-phaseData.bubbleStart;
         updateTypewriterAudio(phaseData.bubbleTw, local);
         if(local > phaseData.bubbleTw.doneAt + 1.3){ // "...beat..." -- a longer comedic pause
-          phaseData.stage = 3;
+          phaseData.stage = 5;
           phaseData.bubbleTw = makeTypewriter(['ALL MY PHOTOS.'], 12, 0.4);
           phaseData.bubbleStart = phaseElapsed;
         }
-      } else if(phaseData.stage===3){
+      } else if(phaseData.stage===5){
         const local = phaseElapsed-phaseData.bubbleStart;
         updateTypewriterAudio(phaseData.bubbleTw, local);
         if(local > phaseData.bubbleTw.doneAt + 0.3){
-          phaseData.stage = 4;
+          phaseData.stage = 6;
           phaseData.reactAt = phaseElapsed;
           d.bounceT = 0.001;
           if(actx) playSadGliss(actx.currentTime);
@@ -2995,12 +3075,12 @@ function updatePhase(dt){
             if(!od.walking && !od.retired) spawnHaBurst(od.x, od.y-40, gameT);
           }
         }
-      } else if(phaseData.stage===4){
+      } else if(phaseData.stage===6){
         if(phaseElapsed - phaseData.reactAt > 1.2){
-          phaseData.stage = 5;
+          phaseData.stage = 7;
           phaseData.walkBackStart = phaseElapsed;
         }
-      } else if(phaseData.stage===5){
+      } else if(phaseData.stage===7){
         const t = clamp01((phaseElapsed-phaseData.walkBackStart)/EP_A_WALK_DUR);
         d.x = lerp(phaseData.doorX, phaseData.startX, t);
         d.y = lerp(phaseData.doorY, phaseData.startY, t);
@@ -3012,26 +3092,30 @@ function updatePhase(dt){
       break;
     }
     case 'epilogueB': {
-      const EPB_SHOT1_DUR = 2.6, EPB_SHOT2_DUR = 3.6, EPB_SHOT3_DUR = 3.4;
+      // stages: 1 dining room (builder guy thoughtful) -> 2 plane home ->
+      // 3 desk build-up -> 4 sharing with the 4 guys -> beat5_chase
+      const EPB_SHOT1_DUR = 4.0, EPB_SHOT2_DUR = 4.0, EPB_SHOT3_DUR = 6.0, EPB_SHOT4_DUR = 4.0;
       if(phaseData.stage===1){
         if(phaseElapsed > EPB_SHOT1_DUR){ phaseData.stage=2; phaseData.stage2At=phaseElapsed; }
       } else if(phaseData.stage===2){
-        const local = phaseElapsed - phaseData.stage2At;
+        if(phaseElapsed - phaseData.stage2At > EPB_SHOT2_DUR){ phaseData.stage=3; phaseData.stage3At=phaseElapsed; }
+      } else if(phaseData.stage===3){
+        const local = phaseElapsed - phaseData.stage3At;
         if(local - phaseData.lastKeyBlipAt >= 0.18){
           phaseData.lastKeyBlipAt = local;
           if(actx) playKeyBlip(actx.currentTime);
         }
-        if(local > EPB_SHOT2_DUR){ phaseData.stage=3; phaseData.stage3At=phaseElapsed; }
-      } else if(phaseData.stage===3){
-        const local = phaseElapsed - phaseData.stage3At;
-        const pingTimes = [0.3,0.9,1.5,2.1];
+        if(local > EPB_SHOT3_DUR){ phaseData.stage=4; phaseData.stage4At=phaseElapsed; }
+      } else if(phaseData.stage===4){
+        const local = phaseElapsed - phaseData.stage4At;
+        const pingTimes = [0.3,1.3,2.3,3.3];
         if(phaseData.pingIndex<4 && local>=pingTimes[phaseData.pingIndex]){
           const idx = phaseData.pingIndex;
           spawnSparkleBurst(EPB_FACE_XS[idx], EPB_FACE_Y+10, 6, gameT);
           if(actx) playSoftChime(actx.currentTime);
           phaseData.pingIndex++;
         }
-        if(local > EPB_SHOT3_DUR){ enterPhase('beat5_chase'); }
+        if(local > EPB_SHOT4_DUR){ enterPhase('beat5_chase'); }
       }
       break;
     }
@@ -3472,22 +3556,76 @@ function drawEpBPlane(ctx, x, y){
   ctx.fillRect(x+6, y-6, 3, 12);
   drawPixelCircle(ctx, x+16, y, 2, '#fff3c9', 2);
 }
+/* the "tiny recognizable dinner scene" that progressively builds in below the
+   mini title on the desk screen -- reuses the real table/diner draw helpers
+   (drawDinerSprite) at a small scale rather than bespoke art. */
+function drawEpBMiniDinner(ctx, cx, cy){
+  ctx.fillStyle = PAL.wood;
+  ctx.fillRect(cx-17, cy-6, 34, 13);
+  const offs = [ [-15,-10], [11,-10], [-15, 9], [11, 9] ];
+  for(let i=0;i<4;i++){
+    const def = DINER_DEFS[i];
+    drawDinerSprite(ctx, def.col, def.row, cx+offs[i][0], cy+offs[i][1], def.flip, 0.5);
+  }
+}
 function drawEpBDeskRoom(ctx, t){
   ctx.fillStyle = '#140f18'; ctx.fillRect(0,0,CW,CH);
   const deskX = CW/2, deskY = 360;
-  ctx.save(); ctx.globalAlpha=0.25; drawPixelCircle(ctx, deskX, deskY-60, 90, '#8fd0ff', 8); ctx.restore();
+  // the screen "lights up" over the first beat of the shot
+  const glowT = clamp01(t/0.8);
+  ctx.save(); ctx.globalAlpha=0.25*glowT; drawPixelCircle(ctx, deskX, deskY-60, 90, '#8fd0ff', 8); ctx.restore();
   ctx.fillStyle = '#0a0e14'; ctx.fillRect(deskX-90, deskY-120, 180, 110);
+  ctx.save();
+  ctx.globalAlpha = 0.3+0.7*glowT;
   ctx.fillStyle = '#123047'; ctx.fillRect(deskX-80, deskY-110, 160, 90);
-  const tc = getMiniTitleCanvas();
-  const scale = 0.55;
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(tc, deskX-tc.width*scale/2, deskY-105, tc.width*scale, tc.height*scale);
+  ctx.restore();
+  // 1) the mini title lockup pops in first
+  const titleP = clamp01((t-1.0)/0.4);
+  if(titleP>0){
+    const tc = getMiniTitleCanvas();
+    const scale = 0.5*(0.7+0.3*titleP);
+    ctx.save();
+    ctx.globalAlpha = titleP;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tc, deskX-tc.width*scale/2, deskY-104, tc.width*scale, tc.height*scale);
+    ctx.restore();
+  }
+  // 2) then, below it, the tiny dinner scene builds in
+  const sceneP = clamp01((t-2.6)/0.6);
+  if(sceneP>0){
+    ctx.save();
+    ctx.globalAlpha = sceneP;
+    drawEpBMiniDinner(ctx, deskX, deskY-58);
+    ctx.restore();
+  }
   ctx.fillStyle = PAL.wood; ctx.fillRect(deskX-100, deskY-10, 200, 14);
   drawTile(ctx, rawTile(imgDungeon, DINER_DEFS[3].col, DINER_DEFS[3].row), deskX-16, deskY-70, 2, false);
+  // typing animation + key blips run the whole shot (handled by the caller)
   const tap = Math.floor(t*7)%2===0;
   ctx.fillStyle = tap ? '#f3e9d2' : '#c9b98a';
   ctx.fillRect(deskX-14, deskY-6, 10, 6);
   ctx.fillRect(deskX+4, deskY-6, 10, 6);
+}
+/* small drifting "thinking" dots, used above the builder guy's head in
+   Epilogue B shot 1 (dining room). Purely time-driven (phaseElapsed), no
+   Math.random, so it's deterministic/testable like the rest of the file. */
+function drawThoughtDots(ctx, x, y, t){
+  const cyc = t % 1.6;
+  for(let i=0;i<3;i++){
+    const start = i*0.3;
+    const local = cyc-start;
+    if(local<0 || local>1.0) continue;
+    const p = clamp01(local/1.0);
+    const dx = x + 14 + i*10, dy = y - 70 - i*14 - p*6;
+    const alpha = Math.sin(p*Math.PI);
+    if(alpha<=0) continue;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = PAL.cream;
+    const s = 3+i*1.5;
+    ctx.fillRect(dx-s/2, dy-s/2, s, s);
+    ctx.restore();
+  }
 }
 const EPB_FACE_XS = [300, 420, 540, 660], EPB_FACE_Y = 260;
 function drawEpBSharing(ctx, pingIndex){
@@ -3548,30 +3686,98 @@ function drawPhaseCelebration(ctx){
     drawChunkyText(ctx, 'FOR FREE?', CW/2, CH/2-20, 60, PAL.gold, PAL.outline, 'center');
   }
 }
+/* ---------------- Epilogue A visuals (the bathroom photo deletion) ----------------
+   A zoomed phone inset showing a 16-thumbnail photo gallery, then visibly
+   popping the thumbnails away a few at a time -- the deletion has to be seen
+   on screen, not just implied by the bubble text. */
+const EPA_THUMB_COLORS = ['#e8b84b','#c96f4a','#7ec8e3','#8fd0ff','#e0645a','#a3d977','#f3e9d2','#6b2b1f','#ffb347','#4a6a80','#8a5a30','#d9a6c2','#5ac8a8','#c9b98a','#3c7a5e','#e89ba0'];
+const EPA_VANISH_ORDER = [5,12,1,9,14,2,7,15,0,10,4,13,3,11,6,8]; // fixed pop-away order (deterministic)
+const EPA_VANISH_WAVE = 0.12, EPA_VANISH_PER_WAVE = 4; // 4 waves of 4 = 16, ~0.48s total
+const EPA_PHONE_W = 150, EPA_PHONE_H = 200;
+function epaGoneCount(local){
+  if(local<0) return 0;
+  return Math.min(16, Math.floor(local/EPA_VANISH_WAVE)*EPA_VANISH_PER_WAVE);
+}
+function epAPhoneRect(d){
+  const cx = Math.max(EPA_PHONE_W/2+10, Math.min(CW-EPA_PHONE_W/2-10, d.x));
+  return { x: cx-EPA_PHONE_W/2, y: d.y+14, w: EPA_PHONE_W, h: EPA_PHONE_H };
+}
+function popInEnvelope(t, dur){
+  const p = clamp01(t/dur);
+  const eased = 1-(1-p)*(1-p);
+  return { alpha: eased, scale: 0.7+0.3*eased };
+}
+/* thumbAliveCount thumbnails are shown, in EPA_VANISH_ORDER's surviving order
+   (index 0 of the order array is the FIRST to vanish, so "still alive" means
+   the tail of the order array once goneCount have been popped). */
+function drawPhoneInset(ctx, rect, goneCount, envAlpha, envScale){
+  ctx.save();
+  ctx.globalAlpha = envAlpha;
+  ctx.translate(rect.x+rect.w/2, rect.y+rect.h/2);
+  ctx.scale(envScale, envScale);
+  ctx.translate(-rect.w/2, -rect.h/2);
+  ctx.fillStyle = '#1c1c1c';
+  ctx.fillRect(0, 0, rect.w, rect.h);
+  const sx = 8, sy = 8, sw = rect.w-16, sh = rect.h-16;
+  ctx.fillStyle = '#0a0e14';
+  ctx.fillRect(sx, sy, sw, sh);
+  const cols = 4, rows = 4, gap = 4;
+  const cellW = (sw-gap*(cols-1))/cols, cellH = (sh-gap*(rows-1))/rows;
+  const goneSet = new Set(EPA_VANISH_ORDER.slice(0, goneCount));
+  for(let i=0;i<16;i++){
+    if(goneSet.has(i)) continue;
+    const col = i%cols, row = (i/cols)|0;
+    const tx = sx+col*(cellW+gap), ty = sy+row*(cellH+gap);
+    ctx.fillStyle = EPA_THUMB_COLORS[i];
+    ctx.fillRect(tx, ty, cellW, cellH);
+  }
+  ctx.restore();
+}
 function drawPhaseEpilogueA(ctx){
   drawBaseScene(ctx);
-  if(phaseData.stage>=1 && phaseData.stage<=3){
-    drawPhoneIcon(ctx, phaseData.diner.x, phaseData.diner.y, phaseElapsed);
+  const d = phaseData.diner;
+  if(phaseData.stage>=1 && phaseData.stage<=6){
+    drawPhoneIcon(ctx, d.x, d.y, phaseElapsed);
+    const rect = epAPhoneRect(d);
+    const fadeOutT = phaseData.stage===6 ? clamp01((phaseElapsed-phaseData.reactAt)/0.6) : 0;
+    const env = popInEnvelope(phaseElapsed-(phaseData.galleryPopAt||0), 0.2);
+    const alpha = env.alpha * (1-fadeOutT);
+    if(alpha>0){
+      const goneCount = phaseData.stage>=3 ? epaGoneCount(phaseElapsed-(phaseData.vanishAt||0)) : 0;
+      drawPhoneInset(ctx, rect, goneCount, alpha, env.scale);
+      for(const p of (phaseData.puffs||[])){
+        const age = phaseElapsed-p.born;
+        if(age<0 || age>0.4) continue;
+        drawSparkle(ctx, p.x, p.y-age*20, 3, (1-age/0.4)*alpha, PAL.cream);
+      }
+    }
     if(phaseData.bubbleTw){
       const local = phaseElapsed-phaseData.bubbleStart;
       const state = phaseData.bubbleTw.getState(local);
-      drawAutoBubble(ctx, phaseData.bubbleTw.lines[0].slice(0,state[0]), phaseData.diner.x, phaseData.diner.y-64, 16, 1);
+      drawAutoBubble(ctx, phaseData.bubbleTw.lines[0].slice(0,state[0]), d.x, d.y-64, 16, 1);
     }
   }
 }
 function drawPhaseEpilogueB(ctx){
-  ctx.fillStyle = '#000'; ctx.fillRect(0,0,CW,CH);
   if(phaseData.stage===1){
+    drawBaseScene(ctx);
+    drawThoughtDots(ctx, phaseData.builder.x, phaseData.builder.y, phaseElapsed);
+    drawLetterbox(ctx, 1);
+    drawReadingTextOutlined(ctx, 'THAT NIGHT, ONE OF THE GUYS KEPT THINKING ABOUT THE DINNER.', CW/2, CH-70, 20, PAL.cream, '#000000', 'center');
+    return;
+  }
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,CW,CH);
+  if(phaseData.stage===2){
     drawEpBNightSky(ctx);
-    const t = clamp01(phaseElapsed/2.6);
-    drawEpBPlane(ctx, lerp(CW+40, -40, t), 160);
-    drawReadingTextOutlined(ctx, 'ONE OF THE GUYS FLEW HOME...', CW/2, CH-70, 18, PAL.cream, '#000000', 'center');
-  } else if(phaseData.stage===2){
-    drawEpBDeskRoom(ctx, phaseElapsed-phaseData.stage2At);
-    drawReadingTextOutlined(ctx, 'AND BUILT THIS EXACT GAME.', CW/2, CH-70, 18, PAL.cream, '#000000', 'center');
+    const t = clamp01((phaseElapsed-phaseData.stage2At)/4.0);
+    drawEpBPlane(ctx, lerp(CW+40, -40, easeInOut(t)), 160);
+    drawReadingTextOutlined(ctx, 'HE FLEW HOME.', CW/2, CH-70, 20, PAL.cream, '#000000', 'center');
   } else if(phaseData.stage===3){
+    drawEpBDeskRoom(ctx, phaseElapsed-phaseData.stage3At);
+    drawReadingTextOutlined(ctx, 'AND BUILT A GAME ABOUT THAT EXACT DINNER.', CW/2, CH-70, 20, PAL.cream, '#000000', 'center');
+  } else if(phaseData.stage===4){
     drawEpBSharing(ctx, phaseData.pingIndex);
-    drawReadingTextOutlined(ctx, 'AND SHARED IT WITH THE GUYS.', CW/2, CH-70, 18, PAL.cream, '#000000', 'center');
+    drawReadingTextOutlined(ctx, 'AND SHARED IT WITH THE GUYS.', CW/2, CH-70, 20, PAL.cream, '#000000', 'center');
   }
   drawLetterbox(ctx, 1);
 }
@@ -3791,6 +3997,105 @@ function handleModeSelectTouch(p){
     }
   }
 }
+
+/* ======================================================================
+   VOLUME UI -- a small pixel speaker icon pinned top-right, always drawn
+   last (on top of every other overlay, including the rotate prompt) so
+   it's reachable from literally any screen. Tap it for a 4-option popup
+   (OFF/LOW/MED/HIGH); tap anywhere while the popup is open picks an option
+   if hit, or just closes it either way -- both are swallowed so a popup
+   interaction never also fires a game action underneath it.
+   ====================================================================== */
+const VOL_ICON = { x: CW-44, y: 12, w: 28, h: 28 };
+const VOL_OPTIONS = [ {label:'OFF', value:0}, {label:'LOW', value:0.25}, {label:'MED', value:0.55}, {label:'HIGH', value:1.0} ];
+const VOL_POPUP_W = 208, VOL_POPUP_H = 34;
+let volPopupOpen = false;
+let volToastText = null, volToastUntil = 0;
+function volPopupRect(){
+  return { x: VOL_ICON.x+VOL_ICON.w-VOL_POPUP_W, y: VOL_ICON.y+VOL_ICON.h+8, w:VOL_POPUP_W, h:VOL_POPUP_H };
+}
+function volOptionRect(i){
+  const p = volPopupRect();
+  const cellW = p.w/VOL_OPTIONS.length;
+  return { x:p.x+i*cellW, y:p.y, w:cellW, h:p.h };
+}
+function showVolToast(text){
+  volToastText = text;
+  volToastUntil = performance.now() + 1400;
+}
+function toggleMute(){
+  volPopupOpen = false;
+  if(volumeSetting>0){
+    volumeBeforeMute = volumeSetting;
+    setVolumeSetting(0);
+    showVolToast('SOUND OFF');
+  } else {
+    setVolumeSetting(volumeBeforeMute>0 ? volumeBeforeMute : 0.55);
+    showVolToast('SOUND ON');
+  }
+}
+/* returns true if the tap was consumed by the icon/popup -- callers must
+   check this FIRST, before any other pointerdown handling */
+function handleVolumePointerdown(x, y){
+  if(volPopupOpen){
+    for(let i=0;i<VOL_OPTIONS.length;i++){
+      const r = volOptionRect(i);
+      if(x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h){
+        setVolumeSetting(VOL_OPTIONS[i].value);
+        break;
+      }
+    }
+    volPopupOpen = false; // any tap while open closes it, hit or not
+    return true;
+  }
+  if(x>=VOL_ICON.x && x<=VOL_ICON.x+VOL_ICON.w && y>=VOL_ICON.y && y<=VOL_ICON.y+VOL_ICON.h){
+    volPopupOpen = true;
+    return true;
+  }
+  return false;
+}
+function drawSpeakerIcon(ctx, x, y, level){
+  ctx.save();
+  ctx.fillStyle = PAL.cream;
+  ctx.fillRect(x+2, y+10, 5, 8);   // speaker body
+  ctx.fillRect(x+7, y+8, 3, 12);   // cone, stepped trapezoid (no ctx.rotate -- stays crisp)
+  ctx.fillRect(x+10, y+5, 3, 18);
+  ctx.fillRect(x+13, y+2, 2, 24);
+  if(level<=0){
+    ctx.fillStyle = '#e0645a';
+    for(let i=0;i<8;i++){ // stepped diagonal X, same crisp-diagonal trick as the intro's knife
+      ctx.fillRect(x+17+i, y+4+i, 2, 2);
+      ctx.fillRect(x+17+i, y+18-i, 2, 2);
+    }
+  } else {
+    ctx.fillStyle = PAL.gold;
+    const barX0 = x+18, barW=2, gap=3;
+    for(let i=0;i<3;i++){
+      if(i>=level) continue;
+      const h = 6+i*5;
+      ctx.fillRect(barX0+i*gap, y+14-h, barW, h);
+    }
+  }
+  ctx.restore();
+}
+function drawVolumeUI(ctx){
+  const level = volumeSetting<=0 ? 0 : volumeSetting<0.4 ? 1 : volumeSetting<0.8 ? 2 : 3;
+  drawSpeakerIcon(ctx, VOL_ICON.x, VOL_ICON.y, level);
+  if(volPopupOpen){
+    const p = volPopupRect();
+    ctx.fillStyle = PAL.wood; ctx.fillRect(p.x-3, p.y-3, p.w+6, p.h+6);
+    ctx.fillStyle = '#1a1410'; ctx.fillRect(p.x, p.y, p.w, p.h);
+    for(let i=0;i<VOL_OPTIONS.length;i++){
+      const r = volOptionRect(i);
+      const selected = Math.abs(volumeSetting-VOL_OPTIONS[i].value)<0.01;
+      if(selected){ ctx.fillStyle = 'rgba(232,184,75,0.3)'; ctx.fillRect(r.x+2, r.y+2, r.w-4, r.h-4); }
+      drawReadingText(ctx, VOL_OPTIONS[i].label, r.x+r.w/2, r.y+7, 12, selected?PAL.gold:PAL.cream, 'center');
+    }
+  } else if(volToastText && performance.now() < volToastUntil){
+    const p = volPopupRect();
+    drawReadingTextOutlined(ctx, volToastText, p.x+p.w/2, p.y+8, 14, PAL.gold, '#000000', 'center');
+  }
+}
 /* full-screen "turn your phone" gate -- same visual language as the card
    overlays, blocks all input (see handleAction/pollGamepadAction/pointerdown)
    until the device goes back to landscape */
@@ -3832,6 +4137,7 @@ const MODE_SELECT_KEYS = new Set(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'
 window.addEventListener('keydown', (e)=>{
   keys[e.code] = true;
   ensureAudioStarted();
+  if(e.code==='KeyM' && !e.repeat){ toggleMute(); return; } // works everywhere, even mid-freeze
   if(rotatePromptActive) return; // frozen until landscape
   if(modeSelectPending){
     if(!e.repeat && MODE_SELECT_KEYS.has(e.code)){
@@ -3861,19 +4167,22 @@ function screenToLogical(clientX, clientY){
    cards, same as it always could, since there's no joystick-relevant
    gameplay happening on those screens. */
 window.addEventListener('pointerdown', (e)=>{
+  ensureAudioStarted();
+  // volume icon/popup hit-test FIRST, for both mouse and touch -- swallow if
+  // hit so it never reaches handleAction/joystick/mode-select/card dismissal
+  const volPoint = screenToLogical(e.clientX, e.clientY);
+  if(handleVolumePointerdown(volPoint.x, volPoint.y)) return;
   if(e.pointerType!=='touch'){
     // mouse: any click must unlock audio even on screens where handleAction
     // early-returns (the mode-select guard was swallowing the unlock), and
     // clicking a seating row should work with a mouse too, not just touch
-    ensureAudioStarted();
-    if(modeSelectPending && !rotatePromptActive){ handleModeSelectTouch(screenToLogical(e.clientX, e.clientY)); return; }
+    if(modeSelectPending && !rotatePromptActive){ handleModeSelectTouch(volPoint); return; }
     handleAction();
     return;
   }
   isTouch = true; // confirmed by an actual touch, not just the 'ontouchstart' hint
-  ensureAudioStarted();
   if(rotatePromptActive) return;
-  const p = screenToLogical(e.clientX, e.clientY);
+  const p = volPoint;
   if(modeSelectPending){ handleModeSelectTouch(p); return; }
   if(activeCard || phase==='endcard' || phase==='losecard' || phase==='retrycard' || phase==='gameover'){
     handleAction();
@@ -4046,6 +4355,7 @@ function frame(nowMs){
   if(rotatePromptActive) drawRotatePrompt(ctx);
   else if(modeSelectPending) drawModeSelectOverlay(ctx);
   else if(activeCard) drawCardOverlay(ctx);
+  drawVolumeUI(ctx); // always last -- on top of every other overlay, reachable from any screen
   if(actx) schedulerTick();
 }
 requestAnimationFrame(frame);

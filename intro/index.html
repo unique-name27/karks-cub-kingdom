@@ -478,6 +478,43 @@ let noiseBuffer = null;
 let recordDest = null; // MediaStreamAudioDestinationNode when recording
 let drumsOn = false;
 
+/* ---------------- master volume setting ----------------
+   Shared with game/index.html via localStorage['kck_volume'] so the choice
+   carries between the intro and the game. RECORD_MODE forces full volume at
+   load (recordings must stay full-volume) and hides/disables the icon so it
+   can't be undone mid-recording. */
+function loadVolumeSetting(){
+  if(RECORD_MODE) return 1.0;
+  try{
+    if(!window.localStorage) return 0.55;
+    const raw = localStorage.getItem('kck_volume');
+    if(raw===null) return 0.55;
+    const v = parseFloat(raw);
+    if(!isFinite(v) || v<0 || v>1) return 0.55;
+    return v;
+  }catch(e){ return 0.55; }
+}
+function saveVolumeSetting(v){
+  try{ if(window.localStorage) localStorage.setItem('kck_volume', String(v)); }catch(e){}
+}
+let volumeSetting = loadVolumeSetting();
+let volumeBeforeMute = volumeSetting>0 ? volumeSetting : 0.55;
+function applyMasterVolume(immediate){
+  if(!actx || !masterGain) return;
+  const target = 0.8 * volumeSetting;
+  const now = actx.currentTime;
+  masterGain.gain.cancelScheduledValues(now);
+  masterGain.gain.setValueAtTime(masterGain.gain.value, now);
+  if(immediate) masterGain.gain.setValueAtTime(target, now);
+  else masterGain.gain.linearRampToValueAtTime(target, now+0.08);
+}
+function setVolumeSetting(v){
+  if(RECORD_MODE) return; // locked at 1.0 for the duration of a recording
+  volumeSetting = Math.max(0, Math.min(1, v));
+  saveVolumeSetting(volumeSetting);
+  applyMasterVolume(false);
+}
+
 function noteToFreq(note){
   const m = /^([A-G])(#?)(\d)$/.exec(note);
   if(!m) return 440;
@@ -506,7 +543,7 @@ function initAudio(){
   for(let i=0;i<nd.length;i++) nd[i] = (Math.random()*2-1);
 
   compressor = actx.createDynamicsCompressor();
-  masterGain = actx.createGain(); masterGain.gain.value = 0.8;
+  masterGain = actx.createGain(); masterGain.gain.value = 0.8 * volumeSetting;
   compressor.connect(masterGain);
   masterGain.connect(actx.destination);
 
@@ -1288,6 +1325,81 @@ let lastFrame = performance.now();
 let recorder = null, recordChunks = [], isRecording = false;
 let gpPrevPressed = false;
 
+/* ---------------- volume settings UI ----------------
+   Speaker icon pinned to the top-right corner of the canvas, always visible
+   (boot gate, cinematic, title). Hidden/disabled during RECORD_MODE so an
+   exported video can't have its forced full volume undone mid-recording. */
+function screenToLogical(clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (clientX-rect.left)/rect.width*CW,
+    y: (clientY-rect.top)/rect.height*CH
+  };
+}
+const VOL_ICON = { x: CW-44, y: 12, w: 28, h: 28 };
+const VOL_OPTIONS = [ {label:'OFF', value:0}, {label:'LOW', value:0.25}, {label:'MED', value:0.55}, {label:'HIGH', value:1.0} ];
+const VOL_POPUP_W = 208, VOL_POPUP_H = 34;
+let volPopupOpen = false;
+let volToastText = null, volToastUntil = 0;
+function volPopupRect(){ return { x: VOL_ICON.x+VOL_ICON.w-VOL_POPUP_W, y: VOL_ICON.y+VOL_ICON.h+8, w:VOL_POPUP_W, h:VOL_POPUP_H }; }
+function volOptionRect(i){ const p=volPopupRect(); const cellW=p.w/VOL_OPTIONS.length; return { x:p.x+i*cellW, y:p.y, w:cellW, h:p.h }; }
+function showVolToast(text){ volToastText = text; volToastUntil = performance.now() + 1400; }
+function toggleMute(){
+  if(RECORD_MODE) return;
+  volPopupOpen = false;
+  if(volumeSetting>0){ volumeBeforeMute = volumeSetting; setVolumeSetting(0); showVolToast('SOUND OFF'); }
+  else { setVolumeSetting(volumeBeforeMute>0?volumeBeforeMute:0.55); showVolToast('SOUND ON'); }
+}
+function handleVolumePointerdown(x, y){
+  if(RECORD_MODE) return false;
+  if(volPopupOpen){
+    for(let i=0;i<VOL_OPTIONS.length;i++){
+      const r = volOptionRect(i);
+      if(x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h){ setVolumeSetting(VOL_OPTIONS[i].value); break; }
+    }
+    volPopupOpen = false;
+    return true;
+  }
+  if(x>=VOL_ICON.x && x<=VOL_ICON.x+VOL_ICON.w && y>=VOL_ICON.y && y<=VOL_ICON.y+VOL_ICON.h){ volPopupOpen = true; return true; }
+  return false;
+}
+function drawSpeakerIcon(ctx, x, y, level){
+  ctx.save();
+  ctx.fillStyle = PAL.cream;
+  ctx.fillRect(x+2, y+10, 5, 8);
+  ctx.fillRect(x+7, y+8, 3, 12);
+  ctx.fillRect(x+10, y+5, 3, 18);
+  ctx.fillRect(x+13, y+2, 2, 24);
+  if(level<=0){
+    ctx.fillStyle = '#e0645a';
+    for(let i=0;i<8;i++){ ctx.fillRect(x+17+i, y+4+i, 2, 2); ctx.fillRect(x+17+i, y+18-i, 2, 2); }
+  } else {
+    ctx.fillStyle = PAL.gold;
+    const barX0 = x+18, barW=2, gap=3;
+    for(let i=0;i<3;i++){ if(i>=level) continue; const h = 6+i*5; ctx.fillRect(barX0+i*gap, y+14-h, barW, h); }
+  }
+  ctx.restore();
+}
+function drawVolumeUI(ctx){
+  if(RECORD_MODE) return;
+  const level = volumeSetting<=0 ? 0 : volumeSetting<0.4 ? 1 : volumeSetting<0.8 ? 2 : 3;
+  drawSpeakerIcon(ctx, VOL_ICON.x, VOL_ICON.y, level);
+  if(volPopupOpen){
+    const p = volPopupRect();
+    ctx.fillStyle = PAL.wood; ctx.fillRect(p.x-3, p.y-3, p.w+6, p.h+6);
+    ctx.fillStyle = '#1a1410'; ctx.fillRect(p.x, p.y, p.w, p.h);
+    for(let i=0;i<VOL_OPTIONS.length;i++){
+      const r = volOptionRect(i);
+      const selected = Math.abs(volumeSetting-VOL_OPTIONS[i].value)<0.01;
+      if(selected){ ctx.fillStyle='rgba(232,184,75,0.3)'; ctx.fillRect(r.x+2, r.y+2, r.w-4, r.h-4); }
+      drawReadingText(ctx, VOL_OPTIONS[i].label, r.x+r.w/2, r.y+7, 12, selected?PAL.gold:PAL.cream, 'center');
+    }
+  } else if(volToastText && performance.now() < volToastUntil){
+    const p = volPopupRect();
+    drawReadingTextOutlined(ctx, volToastText, p.x+p.w/2, p.y+8, 14, PAL.gold, '#000000', 'center');
+  }
+}
+
 function trueElapsed(){ return actx ? (actx.currentTime - audioT0) : 0; }
 function sceneElapsedNow(){ return trueElapsed() - sceneClockOffset; }
 function sceneNumFor(se){
@@ -1359,6 +1471,7 @@ function triggerReplay(){
   sceneClockOffset = trueElapsed();
 }
 window.addEventListener('keydown', (e)=>{
+  if(e.code==='KeyM' && !e.repeat){ toggleMute(); return; }
   if(rotatePromptActive) return;
   lastInputTime = performance.now();
   if(state==='boot'){ triggerBoot(); return; }
@@ -1368,6 +1481,8 @@ window.addEventListener('keydown', (e)=>{
 });
 window.addEventListener('pointerdown', (e)=>{
   if(e.pointerType==='touch') isTouch = true; // confirmed by an actual touch
+  const volPoint = screenToLogical(e.clientX, e.clientY);
+  if(handleVolumePointerdown(volPoint.x, volPoint.y)) return;
   if(rotatePromptActive) return;
   lastInputTime = performance.now();
   if(state==='boot'){ triggerBoot(); return; }
@@ -1455,7 +1570,7 @@ function frame(nowMs){
     fitCanvas();
   }
   updateStars(dt);
-  if(state==='boot'){ drawBoot(nowMs); return; }
+  if(state==='boot'){ drawBoot(nowMs); drawVolumeUI(ctx); return; }
   // start the real track the moment it finishes decoding (cheap no-op until
   // then, and forever after it starts)
   if(!useMp3Music && bgmBuffer) tryStartMusic();
@@ -1471,6 +1586,7 @@ function frame(nowMs){
     const localT = se - sceneLocalStart(n);
     updateAndDrawScene(n, localT, se);
     drawRotatePrompt(ctx);
+    drawVolumeUI(ctx);
     return;
   } else if(rotateFrozenSE!==null){
     // back to landscape -- shift the timeline forward by exactly however
@@ -1484,6 +1600,7 @@ function frame(nowMs){
   if(n !== prevSceneNum){ enterScene(n); prevSceneNum = n; }
   const localT = se - sceneLocalStart(n);
   updateAndDrawScene(n, localT, se);
+  drawVolumeUI(ctx);
   checkRecordStop(se);
   if(n===5 && !RECORD_MODE){
     if(performance.now() - lastInputTime >= 25000){
