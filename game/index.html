@@ -377,7 +377,7 @@ function drawAutoBubble(ctx, text, cx, bottomY, px, growT){
    drums, harmony and hat-density can change live per beat of the game).
    ====================================================================== */
 const BEAT_DEFAULT = 60/112;
-let actx = null, masterGain = null, compressor = null, musicGain = null, fxGain = null;
+let actx = null, masterGain = null, compressor = null, musicGain = null, fxGain = null, chipGain = null;
 let noiseBuffer = null;
 let drumsOn = false, harmonyOn = false, hatsSixteenths = false;
 
@@ -414,73 +414,59 @@ function initAudio(){
   musicGain.connect(compressor);
   fxGain = actx.createGain(); fxGain.gain.value = 1.0;
   fxGain.connect(compressor);
+  // the chiptune is a quiet understudy now, not the score -- all its voices
+  // route through this so the fallback can never blast at full volume
+  chipGain = actx.createGain(); chipGain.gain.value = 0.3;
+  chipGain.connect(musicGain);
 }
 
 /* ---------------- background music track (theme.mp3) ----------------
-   Routed into the SAME musicGain node the chiptune scheduler already uses,
-   via createMediaElementSource -- every existing ducking call (setMusicLevel/
-   duckDown/duckUp: the silence beat, the fanfare duck, the finale swell) then
-   keeps working unchanged on the real track with no special-casing. The
-   chiptune scheduler itself keeps running underneath (cheap bookkeeping) but
-   dispatchEvent() skips its actual note-playing calls while useMp3Music is
-   true -- see there. Every direct one-off SFX call (dings, twangs, slam
-   booms, whoosh, chimes, fanfare, record scratch, groan...) is unaffected
-   either way since those aren't routed through the scheduler at all. */
+   FULLY BUFFERED playback: fetch the file (starts immediately at page load,
+   no gesture needed for a fetch), decode it with decodeAudioData once the
+   AudioContext exists, then loop an AudioBufferSourceNode through musicGain.
+   This avoids the <audio>+createMediaElementSource path entirely, which is
+   flaky on iOS Safari (sometimes plays silently or never starts). All the
+   ducking calls (setMusicLevel/duckDown/duckUp) work unchanged since the
+   buffer routes through the same musicGain. The chiptune scheduler keeps
+   running underneath as a QUIET understudy (see chipGain) and its notes are
+   silenced the moment the real track starts -- see dispatchEvent(). Direct
+   one-off SFX are unaffected either way. */
 const MUSIC_TRACK_SRC = '../assets/music/theme.mp3';
-let bgmEl = null, bgmSource = null;
-let useMp3Music = false, bgmFallback = false, bgmPlayAttempts = 0, bgmNextRetryAt = 0, bgmGraceUntil = 0;
-function initMusicTrack(){
-  if(bgmEl || bgmFallback) return;
-  try{
-    bgmEl = document.createElement('audio');
-    bgmEl.loop = true;
-    bgmEl.preload = 'auto';
-    bgmEl.src = MUSIC_TRACK_SRC;
-    // 'playing' is the ground truth for flipping to the real track; a media
-    // 'error' is only fatal after several retries -- phones reject the very
-    // first play() (autoplay policy fires before any tap) and cellular
-    // connections can drop mid-download of the 6MB file, and neither of
-    // those should permanently exile the user to the chiptune fallback
-    bgmEl.addEventListener('playing', ()=>{ useMp3Music = true; });
-    bgmEl.addEventListener('error', ()=>{ if(bgmPlayAttempts >= 12){ bgmFallback = true; useMp3Music = false; } });
-    bgmSource = actx.createMediaElementSource(bgmEl);
-    bgmSource.connect(musicGain);
-  } catch(err){
-    // MediaElementSource unsupported, or the element/graph setup blew up --
-    // never let this take music down entirely, just stay on the chiptune path
-    bgmFallback = true; useMp3Music = false; bgmEl = null; bgmSource = null;
-  }
+let useMp3Music = false, bgmGraceUntil = 0;
+let bgmRawBytes = null, bgmBuffer = null, bgmSourceNode = null;
+let bgmFetchState = 'idle'; // idle | loading | fetched | decoding | ready | failed
+function prefetchMusic(){
+  if(bgmFetchState !== 'idle') return;
+  bgmFetchState = 'loading';
+  fetch(MUSIC_TRACK_SRC)
+    .then(r=>{ if(!r.ok) throw new Error('http '+r.status); return r.arrayBuffer(); })
+    .then(bytes=>{ bgmRawBytes = bytes; bgmFetchState = 'fetched'; tryDecodeMusic(); })
+    .catch(()=>{ bgmFetchState = 'failed'; }); // chiptune (quiet) carries the whole session
 }
-function startMusicTrack(){
-  if(bgmFallback || !bgmEl || useMp3Music) return;
-  // throttle: rapid taps mustn't burn the retry budget while a slow cellular
-  // connection is still downloading the 6MB file
-  const now = performance.now();
-  if(now < bgmNextRetryAt) return;
-  bgmNextRetryAt = now + 3000;
-  bgmPlayAttempts++;
-  // the grace window (chiptune held silent while the mp3 confirms) only
-  // matters on the FIRST attempt -- the silence-into-music moment; later
-  // retries happen with the chiptune already covering, where the handoff
-  // is a crossfade, not a leaked first note
-  if(bgmPlayAttempts === 1) bgmGraceUntil = now + 3000;
+function tryDecodeMusic(){
+  if(!actx || !bgmRawBytes || bgmFetchState !== 'fetched') return;
+  bgmFetchState = 'decoding';
+  const bytes = bgmRawBytes; bgmRawBytes = null;
   try{
-    if(bgmEl.error){ try{ bgmEl.load(); }catch(e){} } // recover a failed download before retrying
-    const p = bgmEl.play();
-    if(p && typeof p.then==='function'){
-      p.then(()=>{ useMp3Music = true; }).catch(()=>{
-        // autoplay rejection / not enough data yet: NOT permanent -- the
-        // chiptune covers until the next user gesture retries this (see
-        // ensureAudioStarted); only give up after many failed attempts
-        if(bgmPlayAttempts >= 12){ bgmFallback = true; useMp3Music = false; }
-      });
-    } else {
-      useMp3Music = true; // browsers without a Promise-returning play() -- assume it started
-    }
-  } catch(err){
-    if(bgmPlayAttempts >= 12){ bgmFallback = true; useMp3Music = false; }
-  }
+    // callback form (not promise) for older Safari compatibility
+    actx.decodeAudioData(bytes,
+      (decoded)=>{ bgmBuffer = decoded; bgmFetchState = 'ready'; tryStartMusic(); },
+      ()=>{ bgmFetchState = 'failed'; });
+  } catch(err){ bgmFetchState = 'failed'; }
 }
+function tryStartMusic(){
+  if(useMp3Music || !actx || !bgmBuffer) return;
+  if(actx.state !== 'running') return; // retried after every gesture/resume
+  try{
+    bgmSourceNode = actx.createBufferSource();
+    bgmSourceNode.buffer = bgmBuffer;
+    bgmSourceNode.loop = true;
+    bgmSourceNode.connect(musicGain);
+    bgmSourceNode.start();
+    useMp3Music = true; // chiptune notes stop dispatching from this instant
+  } catch(err){ /* chiptune keeps covering */ }
+}
+prefetchMusic(); // kick the download off immediately -- it needs no gesture
 
 /* ---- voices (identical synthesis to the intro) ---- */
 function playLead(note, t, dur, vibrato, gain){
@@ -494,7 +480,7 @@ function playLead(note, t, dur, vibrato, gain){
   const relStart = t + Math.max(dur-0.01, 0.01);
   g.gain.setValueAtTime(gain, relStart);
   g.gain.linearRampToValueAtTime(0, relStart+0.01);
-  osc.connect(g); g.connect(musicGain);
+  osc.connect(g); g.connect(chipGain);
   if(vibrato){
     const lfo = actx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 5;
     const lfoGain = actx.createGain();
@@ -514,7 +500,7 @@ function playHarmony(note, t, dur){
   const relStart = t + Math.max(dur-0.01, 0.01);
   g.gain.setValueAtTime(0.07, relStart);
   g.gain.linearRampToValueAtTime(0, relStart+0.01);
-  osc.connect(g); g.connect(musicGain);
+  osc.connect(g); g.connect(chipGain);
   osc.start(t); osc.stop(t+dur+0.02);
 }
 function playBass(note, t, dur, fifth){
@@ -526,7 +512,7 @@ function playBass(note, t, dur, fifth){
   g.gain.setValueAtTime(0, t);
   g.gain.linearRampToValueAtTime(0.22, t+0.006);
   g.gain.linearRampToValueAtTime(0, t+Math.max(dur*0.9,0.02));
-  osc.connect(g); g.connect(musicGain);
+  osc.connect(g); g.connect(chipGain);
   osc.start(t); osc.stop(t+dur+0.02);
 }
 function playKick(t){
@@ -536,7 +522,7 @@ function playKick(t){
   const g = actx.createGain();
   g.gain.setValueAtTime(0.5, t);
   g.gain.exponentialRampToValueAtTime(0.001, t+0.09);
-  osc.connect(g); g.connect(musicGain);
+  osc.connect(g); g.connect(chipGain);
   osc.start(t); osc.stop(t+0.1);
 }
 function playSnare(t){
@@ -545,7 +531,7 @@ function playSnare(t){
   const g = actx.createGain();
   g.gain.setValueAtTime(0.35, t);
   g.gain.exponentialRampToValueAtTime(0.001, t+0.08);
-  src.connect(bp); bp.connect(g); g.connect(musicGain);
+  src.connect(bp); bp.connect(g); g.connect(chipGain);
   src.start(t); src.stop(t+0.09);
 }
 function playHat(t, gain){
@@ -554,7 +540,7 @@ function playHat(t, gain){
   const g = actx.createGain();
   g.gain.setValueAtTime(gain===undefined?0.05:gain, t);
   g.gain.exponentialRampToValueAtTime(0.001, t+0.03);
-  src.connect(hp); hp.connect(g); g.connect(musicGain);
+  src.connect(hp); hp.connect(g); g.connect(chipGain);
   src.start(t); src.stop(t+0.035);
 }
 function playDrone(t, dur){
@@ -565,7 +551,7 @@ function playDrone(t, dur){
   g.gain.linearRampToValueAtTime(0.12, t+0.3);
   g.gain.setValueAtTime(0.12, t+Math.max(dur-0.5,0.31));
   g.gain.linearRampToValueAtTime(0, t+dur);
-  osc.connect(g); g.connect(musicGain);
+  osc.connect(g); g.connect(chipGain);
   osc.start(t); osc.stop(t+dur+0.05);
 }
 function playArp(note, t){
@@ -576,7 +562,7 @@ function playArp(note, t){
   g.gain.linearRampToValueAtTime(0.1, t+0.02);
   g.gain.setValueAtTime(0.1, t+0.15);
   g.gain.linearRampToValueAtTime(0, t+0.15+1.5);
-  osc.connect(g); g.connect(musicGain);
+  osc.connect(g); g.connect(chipGain);
   osc.start(t); osc.stop(t+0.15+1.5+0.05);
 }
 function playTwang(t, gainMul){
@@ -862,12 +848,11 @@ const MUSIC_NOTE_TYPES_GAME = new Set(['lead','harmony','bass','kick','snare','h
 function dispatchEvent(ev, atTime){
   if(MUSIC_NOTE_TYPES_GAME.has(ev.type)){
     if(useMp3Music) return;
-    // grace window: while the mp3's fate is still being decided (its play()
-    // confirmation arrives a beat AFTER the scheduler unlocks), keep the
-    // chiptune silent so its first loud square-wave note doesn't leak out
-    // ahead of the real track. If the mp3 is slow or fails, the chiptune
-    // starts covering once the window lapses.
-    if(bgmEl && !bgmFallback && performance.now() < bgmGraceUntil) return;
+    // grace window: while the track is still downloading/decoding and could
+    // start any moment, keep the chiptune silent so its first note doesn't
+    // leak out ahead of the real music. If the track is slow or failed, the
+    // (quiet) chiptune starts covering once the window lapses.
+    if(bgmFetchState !== 'failed' && performance.now() < bgmGraceUntil) return;
   }
   switch(ev.type){
     case 'lead': playLead(ev.note, atTime, ev.dur, ev.vibrato); break;
@@ -2681,18 +2666,17 @@ function ensureAudioStarted(){
     audioT0 = actx.currentTime;
     startScheduler();
     setMusicProgram(loopProgram('A'), 112);
-    // same user-gesture that unlocks the AudioContext also starts the real
-    // track; dispatchEvent silently no-ops the chiptune note types the
-    // instant useMp3Music flips true, so there's no double-music moment
-    initMusicTrack();
-    startMusicTrack();
-  } else if(!useMp3Music && !bgmFallback && bgmEl){
-    // the first attempt may have been rejected (window 'load' fires this
-    // without a user gesture, and phones always deny that) -- every real
-    // gesture that lands here retries until the track actually plays
-    startMusicTrack();
+    // hold the chiptune silent briefly -- on a normal connection the real
+    // track decodes and starts well inside this window, so the understudy
+    // never makes a sound at all
+    bgmGraceUntil = performance.now() + 3000;
+    tryDecodeMusic(); // decode needs the context that now exists
   }
-  if(actx.state==='suspended' && actx.resume) actx.resume();
+  if(actx.state==='suspended' && actx.resume){
+    const p = actx.resume();
+    if(p && typeof p.then==='function') p.then(tryStartMusic);
+  }
+  tryStartMusic(); // no-op unless decoded, context running, and not yet started
 }
 function handleAction(){
   // unlock/resume audio FIRST -- this must happen on every user gesture,
@@ -3386,9 +3370,9 @@ function frame(nowMs){
   const dt = Math.min(0.05, (nowMs-lastFrameMs)/1000);
   lastFrameMs = nowMs;
   rotatePromptActive = isTouch && window.innerHeight > window.innerWidth;
-  // keep retrying the real track (self-throttled to one try per 3s) -- covers
-  // slow downloads finishing while the player is mid-scene and not tapping
-  if(!useMp3Music && !bgmFallback && bgmEl) startMusicTrack();
+  // start the real track the moment it finishes decoding, even if the player
+  // is mid-scene and not touching anything (cheap no-op until then)
+  if(!useMp3Music && bgmBuffer) tryStartMusic();
   // self-heal a canvas that was sized while the viewport reported 0x0
   if(window.innerWidth > 0 && Math.abs(parseInt(canvas.style.width||'0') - Math.floor(CW*Math.min(window.innerWidth/CW, window.innerHeight/CH))) > 2 && window.innerHeight > 0){
     fitCanvas();
