@@ -528,7 +528,7 @@ function initAudio(){
    track. Falls back to the chiptune scheduler automatically on any failure. */
 const MUSIC_TRACK_SRC = '../assets/music/theme.mp3';
 let bgmEl = null, bgmSource = null;
-let useMp3Music = false, bgmFallback = false;
+let useMp3Music = false, bgmFallback = false, bgmPlayAttempts = 0, bgmNextRetryAt = 0;
 function initMusicTrack(){
   if(bgmEl || bgmFallback) return;
   try{
@@ -536,7 +536,11 @@ function initMusicTrack(){
     bgmEl.loop = true;
     bgmEl.preload = 'auto';
     bgmEl.src = MUSIC_TRACK_SRC;
-    bgmEl.addEventListener('error', ()=>{ bgmFallback = true; useMp3Music = false; });
+    // 'playing' is the ground truth; media 'error' is only fatal after many
+    // retries -- slow phone connections can drop mid-download of the 6MB
+    // file, and that shouldn't permanently exile the user to the chiptune
+    bgmEl.addEventListener('playing', ()=>{ useMp3Music = true; });
+    bgmEl.addEventListener('error', ()=>{ if(bgmPlayAttempts >= 12){ bgmFallback = true; useMp3Music = false; } });
     bgmSource = actx.createMediaElementSource(bgmEl);
     bgmSource.connect(musicGain);
   } catch(err){
@@ -544,16 +548,26 @@ function initMusicTrack(){
   }
 }
 function startMusicTrack(){
-  if(bgmFallback || !bgmEl) return;
+  if(bgmFallback || !bgmEl || useMp3Music) return;
+  const now = performance.now();
+  if(now < bgmNextRetryAt) return;
+  bgmNextRetryAt = now + 3000;
+  bgmPlayAttempts++;
   try{
+    if(bgmEl.error){ try{ bgmEl.load(); }catch(e){} } // recover a failed download before retrying
     const p = bgmEl.play();
     if(p && typeof p.then==='function'){
-      p.then(()=>{ useMp3Music = true; }).catch(()=>{ bgmFallback = true; useMp3Music = false; });
+      // a rejected play() (autoplay policy / not enough data yet) is NOT
+      // permanent -- the chiptune covers until a retry lands (frame() retries
+      // every few seconds once the boot gesture has blessed the element)
+      p.then(()=>{ useMp3Music = true; }).catch(()=>{
+        if(bgmPlayAttempts >= 12){ bgmFallback = true; useMp3Music = false; }
+      });
     } else {
       useMp3Music = true;
     }
   } catch(err){
-    bgmFallback = true; useMp3Music = false;
+    if(bgmPlayAttempts >= 12){ bgmFallback = true; useMp3Music = false; }
   }
 }
 
@@ -1435,6 +1449,10 @@ function frame(nowMs){
   }
   updateStars(dt);
   if(state==='boot'){ drawBoot(nowMs); return; }
+  // keep retrying the real track after boot -- the boot tap blessed the
+  // element, so later programmatic play() attempts are allowed even without
+  // a fresh gesture; startMusicTrack() self-throttles to one try per 3s
+  if(!useMp3Music && !bgmFallback && bgmEl) startMusicTrack();
   rotatePromptActive = isTouch && window.innerHeight > window.innerWidth;
   if(rotatePromptActive){
     // audio-clock-driven timeline can't just "skip an update call" the way
