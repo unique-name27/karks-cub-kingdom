@@ -388,19 +388,20 @@ let drumsOn = false, harmonyOn = false, hatsSixteenths = false;
    between the intro and the game and across visits. */
 function loadVolumeSetting(){
   try{
-    if(!window.localStorage) return 0.55;
+    if(!window.localStorage) return 0.25;
     const raw = localStorage.getItem('kck_volume');
-    if(raw===null) return 0.55;
+    if(raw===null) return 0.25;
     const v = parseFloat(raw);
-    if(!isFinite(v) || v<0 || v>1) return 0.55;
+    if(!isFinite(v) || v<0 || v>1) return 0.25;
+    if(v===0.55 || v===1) return 0.25; // legacy louder-scale values from older builds remap to the new MED
     return v;
-  }catch(e){ return 0.55; }
+  }catch(e){ return 0.25; }
 }
 function saveVolumeSetting(v){
   try{ if(window.localStorage) localStorage.setItem('kck_volume', String(v)); }catch(e){}
 }
 let volumeSetting = loadVolumeSetting();
-let volumeBeforeMute = volumeSetting>0 ? volumeSetting : 0.55;
+let volumeBeforeMute = volumeSetting>0 ? volumeSetting : 0.25;
 /* ramps into masterGain over ~80ms to avoid clicks; `immediate` skips the
    ramp (used once at initAudio() time, where there's nothing to click from) */
 function applyMasterVolume(immediate){
@@ -4007,7 +4008,7 @@ function handleModeSelectTouch(p){
    interaction never also fires a game action underneath it.
    ====================================================================== */
 const VOL_ICON = { x: CW-44, y: 12, w: 28, h: 28 };
-const VOL_OPTIONS = [ {label:'OFF', value:0}, {label:'LOW', value:0.25}, {label:'MED', value:0.55}, {label:'HIGH', value:1.0} ];
+const VOL_OPTIONS = [ {label:'OFF', value:0}, {label:'LOW', value:0.12}, {label:'MED', value:0.25}, {label:'HIGH', value:0.6} ];
 const VOL_POPUP_W = 208, VOL_POPUP_H = 34;
 let volPopupOpen = false;
 let volToastText = null, volToastUntil = 0;
