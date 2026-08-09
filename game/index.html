@@ -372,14 +372,16 @@ function drawAutoBubble(ctx, text, cx, bottomY, px, growT){
 }
 
 /* ======================================================================
-   AUDIO ENGINE -- all synthesized, WebAudio only (copied + adapted from
-   intro/index.html: same voices/SFX/theme tables, generalized so tempo,
-   drums, harmony and hat-density can change live per beat of the game).
+   AUDIO ENGINE -- real Kenney CC0 samples (one-shot SFX + a per-beat music
+   loop score) over WebAudio, loaded through a generalized buffer-bank
+   loader (fetch+decodeAudioData, the same proven pattern the theme.mp3
+   track already used -- see assets/audio/CREDITS.txt for the source list).
+   The Karplus-Strong jaw-harp "twang" stays fully synthesized below -- it's
+   a signature sound, not a placeholder. Speech synthesis is untouched.
    ====================================================================== */
 const BEAT_DEFAULT = 60/112;
-let actx = null, masterGain = null, compressor = null, musicGain = null, fxGain = null, chipGain = null;
+let actx = null, masterGain = null, compressor = null, musicGain = null, fxGain = null, loopGain = null;
 let noiseBuffer = null;
-let drumsOn = false, harmonyOn = false, hatsSixteenths = false;
 
 /* ---------------- master volume ----------------
    0..1, multiplied into masterGain (masterGain.gain = 0.8 * volumeSetting)
@@ -419,24 +421,6 @@ function setVolumeSetting(v){
   applyMasterVolume(false);
 }
 
-function noteToFreq(note){
-  const m = /^([A-G])(#?)(\d)$/.exec(note);
-  if(!m) return 440;
-  const letter = m[1], sharp = m[2]==='#', oct = +m[3];
-  const base = {C:-9,D:-7,E:-5,F:-4,G:-2,A:0,B:2}[letter] + (sharp?1:0);
-  const n = base + (oct-4)*12;
-  return 440*Math.pow(2, n/12);
-}
-const CMAJ = ['C','D','E','F','G','A','B'];
-function diatonicThirdBelow(note){
-  const m = /^([A-G])(\d)$/.exec(note);
-  if(!m) return note;
-  const letter = m[1]; let oct = +m[2];
-  let idx = CMAJ.indexOf(letter) - 2;
-  while(idx < 0){ idx += 7; oct -= 1; }
-  return CMAJ[idx] + oct;
-}
-
 function initAudio(){
   if(actx) return;
   const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -452,10 +436,19 @@ function initAudio(){
   musicGain.connect(compressor);
   fxGain = actx.createGain(); fxGain.gain.value = 1.0;
   fxGain.connect(compressor);
-  // the chiptune is a quiet understudy now, not the score -- all its voices
-  // route through this so the fallback can never blast at full volume
-  chipGain = actx.createGain(); chipGain.gain.value = 0.3;
-  chipGain.connect(musicGain);
+  // the per-beat loop score is a quiet understudy while USE_CUSTOM_SONG's
+  // track is still downloading -- same cover-while-downloading role the old
+  // chiptune understudy played -- and is silenced entirely once the real
+  // track is confirmed playing (see updateBeatMusic()). Games that don't
+  // configure a custom song (USE_CUSTOM_SONG=false) run the loops at full
+  // level instead, since they ARE the score in that case.
+  loopGain = actx.createGain(); loopGain.gain.value = USE_CUSTOM_SONG ? 0.3 : 1.0;
+  loopGain.connect(musicGain);
+  // decode whatever's already finished fetching (started at page load,
+  // well before this first-gesture call in the overwhelming majority of
+  // real sessions); tryDecode() is a safe no-op for anything not fetched yet
+  tryDecodeAllSamples();
+  tryDecodeAllLoops();
 }
 
 /* ---------------- background music track (theme.mp3) ----------------
@@ -465,10 +458,16 @@ function initAudio(){
    This avoids the <audio>+createMediaElementSource path entirely, which is
    flaky on iOS Safari (sometimes plays silently or never starts). All the
    ducking calls (setMusicLevel/duckDown/duckUp) work unchanged since the
-   buffer routes through the same musicGain. The chiptune scheduler keeps
-   running underneath as a QUIET understudy (see chipGain) and its notes are
-   silenced the moment the real track starts -- see dispatchEvent(). Direct
-   one-off SFX are unaffected either way. */
+   buffer routes through the same musicGain. The per-beat loop score keeps
+   running underneath as a QUIET understudy (see loopGain) and is silenced
+   the moment the real track starts -- see updateBeatMusic(). Direct one-off
+   SFX are unaffected either way. */
+/* Karks Cub Kingdom ships with its own uploaded song and keeps it, exactly
+   as before -- this toggle exists for future games in the product line that
+   don't configure a custom song, in which case the loops below become the
+   actual score (played at full level, not the quiet-understudy level) with
+   no mp3 to wait for at all. */
+const USE_CUSTOM_SONG = true;
 const MUSIC_TRACK_SRC = '../assets/music/theme.mp3';
 let useMp3Music = false, bgmGraceUntil = 0;
 let bgmRawBytes = null, bgmBuffer = null, bgmSourceNode = null;
@@ -479,7 +478,7 @@ function prefetchMusic(){
   fetch(MUSIC_TRACK_SRC)
     .then(r=>{ if(!r.ok) throw new Error('http '+r.status); return r.arrayBuffer(); })
     .then(bytes=>{ bgmRawBytes = bytes; bgmFetchState = 'fetched'; tryDecodeMusic(); })
-    .catch(()=>{ bgmFetchState = 'failed'; }); // chiptune (quiet) carries the whole session
+    .catch(()=>{ bgmFetchState = 'failed'; }); // the loop score (quiet) carries the whole session
 }
 function tryDecodeMusic(){
   if(!actx || !bgmRawBytes || bgmFetchState !== 'fetched') return;
@@ -501,108 +500,146 @@ function tryStartMusic(){
     bgmSourceNode.loop = true;
     bgmSourceNode.connect(musicGain);
     bgmSourceNode.start();
-    useMp3Music = true; // chiptune notes stop dispatching from this instant
-  } catch(err){ /* chiptune keeps covering */ }
+    useMp3Music = true; // the beat loop is faded out and stopped from this instant (see updateBeatMusic)
+  } catch(err){ /* the loop score keeps covering */ }
 }
-prefetchMusic(); // kick the download off immediately -- it needs no gesture
+if(USE_CUSTOM_SONG) prefetchMusic(); // kick the download off immediately -- it needs no gesture
 
-/* ---- voices (identical synthesis to the intro) ---- */
-function playLead(note, t, dur, vibrato, gain){
-  gain = gain===undefined ? 0.16 : gain;
-  const freq = noteToFreq(note);
-  const osc = actx.createOscillator(); osc.type = 'square';
-  osc.frequency.setValueAtTime(freq, t);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(gain, t+0.008);
-  const relStart = t + Math.max(dur-0.01, 0.01);
-  g.gain.setValueAtTime(gain, relStart);
-  g.gain.linearRampToValueAtTime(0, relStart+0.01);
-  osc.connect(g); g.connect(chipGain);
-  if(vibrato){
-    const lfo = actx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 5;
-    const lfoGain = actx.createGain();
-    lfoGain.gain.value = freq*(Math.pow(2,4/1200)-1);
-    lfo.connect(lfoGain); lfoGain.connect(osc.frequency);
-    lfo.start(t); lfo.stop(t+dur+0.05);
+/* ---------------- generalized sample buffer bank ----------------
+   Fetches every SFX + music-loop file immediately at page load (fetch needs
+   no user gesture); once the AudioContext exists (first user gesture),
+   decodes whatever's already arrived and anything that finishes later.
+   Same proven fetch+decodeAudioData pattern as the theme.mp3 loader above,
+   generalized to a keyed bank. A 404 or decode failure just leaves that key
+   silent forever (playSample()/startLoopNow() no-op) -- no thrown errors. */
+function makeBufferBank(defs){
+  const bank = {};
+  for(const key in defs) bank[key] = { state:'idle', rawBytes:null, buffer:null };
+  function prefetch(key){
+    const rec = bank[key];
+    if(rec.state!=='idle') return;
+    rec.state = 'loading';
+    fetch(defs[key].src)
+      .then(r=>{ if(!r.ok) throw new Error('http '+r.status); return r.arrayBuffer(); })
+      .then(bytes=>{ rec.rawBytes = bytes; rec.state = 'fetched'; tryDecode(key); })
+      .catch(()=>{ rec.state = 'failed'; });
   }
-  osc.start(t); osc.stop(t+dur+0.02);
+  function tryDecode(key){
+    const rec = bank[key];
+    if(!actx || !rec.rawBytes || rec.state!=='fetched') return;
+    rec.state = 'decoding';
+    const bytes = rec.rawBytes; rec.rawBytes = null;
+    try{
+      actx.decodeAudioData(bytes, (decoded)=>{ rec.buffer=decoded; rec.state='ready'; }, ()=>{ rec.state='failed'; });
+    }catch(e){ rec.state = 'failed'; }
+  }
+  function prefetchAll(){ for(const key in defs) prefetch(key); }
+  function tryDecodeAll(){ for(const key in defs) tryDecode(key); }
+  return { bank, prefetchAll, tryDecodeAll };
 }
-function playHarmony(note, t, dur){
-  const freq = noteToFreq(note);
-  const osc = actx.createOscillator(); osc.type = 'square';
-  osc.frequency.setValueAtTime(freq, t);
+
+/* ---- one-shot SFX (real samples, routed into fxGain like the old synth
+   one-shots were; gain values tuned to roughly match their old synthesized
+   loudness) ---- */
+const SFX_DEFS = {
+  ding:          { src:'../assets/audio/sfx/confirmation_001.ogg',     gain:0.7 },
+  pickupChime:   { src:'../assets/audio/sfx/confirmation_004.ogg',     gain:0.7 },
+  recordScratch: { src:'../assets/audio/sfx/scratch_002.ogg',          gain:0.8 },
+  groan:         { src:'../assets/audio/sfx/error_003.ogg',            gain:0.6 },
+  drainBlip:     { src:'../assets/audio/sfx/close_002.ogg',            gain:0.4 },
+  sadGliss:      { src:'../assets/audio/sfx/minimize_006.ogg',         gain:0.6 },
+  keyBlip:       { src:'../assets/audio/sfx/tick_001.ogg',             gain:0.5 },
+  softChime:     { src:'../assets/audio/sfx/select_006.ogg',           gain:0.6 },
+  slamBoom:      { src:'../assets/audio/sfx/impactWood_heavy_002.ogg', gain:0.9 },
+  glassShatter:  { src:'../assets/audio/sfx/impactGlass_heavy_001.ogg',gain:0.8 },
+  thud:          { src:'../assets/audio/sfx/impactSoft_medium_002.ogg',gain:0.8 },
+  whoosh:        { src:'../assets/audio/sfx/woosh3.ogg',               gain:0.6 },
+  rumble:        { src:'../assets/audio/sfx/stoneDrag2.ogg',           gain:0.7 },
+  fanfare:       { src:'../assets/audio/sfx/jingles-hit_10.ogg',       gain:0.8 },
+  jingleStart:   { src:'../assets/audio/sfx/jingles-hit_03.ogg',       gain:0.8 },
+  haBlip:        { src:'../assets/audio/sfx/jingles-hit_02.ogg',       gain:0.6 },
+};
+const sfxLoader = makeBufferBank(SFX_DEFS);
+function tryDecodeAllSamples(){ sfxLoader.tryDecodeAll(); }
+sfxLoader.prefetchAll(); // kick off immediately -- no gesture needed for fetch
+function playSample(key, t, gainMul){
+  const rec = sfxLoader.bank[key];
+  if(!actx || !rec || rec.state!=='ready' || !rec.buffer) return;
+  const src = actx.createBufferSource();
+  src.buffer = rec.buffer;
   const g = actx.createGain();
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(0.07, t+0.01);
-  const relStart = t + Math.max(dur-0.01, 0.01);
-  g.gain.setValueAtTime(0.07, relStart);
-  g.gain.linearRampToValueAtTime(0, relStart+0.01);
-  osc.connect(g); g.connect(chipGain);
-  osc.start(t); osc.stop(t+dur+0.02);
+  g.gain.value = (SFX_DEFS[key].gain!==undefined?SFX_DEFS[key].gain:1) * (gainMul===undefined?1:gainMul);
+  src.connect(g); g.connect(fxGain);
+  src.start(t===undefined?actx.currentTime:t);
 }
-function playBass(note, t, dur, fifth){
-  let freq = noteToFreq(note);
-  if(fifth) freq *= Math.pow(2, 7/12);
-  const osc = actx.createOscillator(); osc.type = 'triangle';
-  osc.frequency.setValueAtTime(freq, t);
+
+/* ---- per-beat music loops (the fallback/quiet-understudy score; KCK's own
+   theme.mp3 always wins while USE_CUSTOM_SONG is true -- see
+   updateBeatMusic()). Final picks documented in assets/audio/CREDITS.txt. */
+const MUSIC_LOOP_DEFS = {
+  dinner:      { src:'../assets/audio/music/wacky-waiting.ogg' },
+  boss:        { src:'../assets/audio/music/mission-plausible.ogg' },
+  chase:       { src:'../assets/audio/music/time-driving.ogg' },
+  celebration: { src:'../assets/audio/music/farm-frolics.ogg' },
+  sad:         { src:'../assets/audio/music/sad-descent.ogg' },
+  gameover:    { src:'../assets/audio/music/game-over.ogg' },
+};
+const loopLoader = makeBufferBank(MUSIC_LOOP_DEFS);
+function tryDecodeAllLoops(){ loopLoader.tryDecodeAll(); }
+loopLoader.prefetchAll();
+
+let currentLoopKey = null, currentLoopSource = null, currentLoopNodeGain = null;
+let pendingLoopKey = 'dinner';
+const LOOP_CROSSFADE = 0.4; // ~400ms clean crossfade on beat changes, per spec
+function startLoopNow(key){
+  const rec = loopLoader.bank[key];
+  if(!actx || !rec || rec.state!=='ready' || !rec.buffer) return; // retried every frame by updateBeatMusic
+  const now = actx.currentTime;
+  if(currentLoopSource){
+    const oldGain = currentLoopNodeGain, oldSrc = currentLoopSource;
+    oldGain.gain.cancelScheduledValues(now);
+    oldGain.gain.setValueAtTime(oldGain.gain.value, now);
+    oldGain.gain.linearRampToValueAtTime(0, now+LOOP_CROSSFADE);
+    oldSrc.stop(now+LOOP_CROSSFADE+0.05);
+  }
+  const src = actx.createBufferSource();
+  src.buffer = rec.buffer; src.loop = true;
   const g = actx.createGain();
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(0.22, t+0.006);
-  g.gain.linearRampToValueAtTime(0, t+Math.max(dur*0.9,0.02));
-  osc.connect(g); g.connect(chipGain);
-  osc.start(t); osc.stop(t+dur+0.02);
+  g.gain.setValueAtTime(0, now);
+  g.gain.linearRampToValueAtTime(1, now+LOOP_CROSSFADE);
+  src.connect(g); g.connect(loopGain);
+  src.start(now);
+  currentLoopSource = src; currentLoopNodeGain = g; currentLoopKey = key;
 }
-function playKick(t){
-  const osc = actx.createOscillator(); osc.type = 'sine';
-  osc.frequency.setValueAtTime(120, t);
-  osc.frequency.exponentialRampToValueAtTime(45, t+0.09);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.5, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.09);
-  osc.connect(g); g.connect(chipGain);
-  osc.start(t); osc.stop(t+0.1);
+function stopLoopNow(){
+  if(!actx || !currentLoopSource){ currentLoopKey = null; return; }
+  const now = actx.currentTime;
+  const oldGain = currentLoopNodeGain, oldSrc = currentLoopSource;
+  oldGain.gain.cancelScheduledValues(now);
+  oldGain.gain.setValueAtTime(oldGain.gain.value, now);
+  oldGain.gain.linearRampToValueAtTime(0, now+LOOP_CROSSFADE);
+  oldSrc.stop(now+LOOP_CROSSFADE+0.05);
+  currentLoopSource = null; currentLoopNodeGain = null; currentLoopKey = null;
 }
-function playSnare(t){
-  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
-  const bp = actx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1800; bp.Q.value=1;
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.35, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.08);
-  src.connect(bp); bp.connect(g); g.connect(chipGain);
-  src.start(t); src.stop(t+0.09);
+/* sets the DESIRED beat-loop key; the actual crossfaded start happens lazily
+   from updateBeatMusic() (called every frame from frame()) once the
+   AudioContext exists and -- if USE_CUSTOM_SONG -- the grace window has
+   lapsed or the custom track is already known to have failed. Same "quiet
+   understudy" gating the old chiptune scheduler applied per-note, applied
+   here once per loop start instead. */
+function setBeatMusic(key){ pendingLoopKey = key; }
+function updateBeatMusic(){
+  if(!actx) return;
+  if(USE_CUSTOM_SONG && useMp3Music){
+    if(currentLoopKey) stopLoopNow();
+    return;
+  }
+  if(USE_CUSTOM_SONG && bgmFetchState!=='failed' && performance.now() < bgmGraceUntil) return; // still covering silently
+  if(currentLoopKey !== pendingLoopKey) startLoopNow(pendingLoopKey);
 }
-function playHat(t, gain){
-  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
-  const hp = actx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=6000;
-  const g = actx.createGain();
-  g.gain.setValueAtTime(gain===undefined?0.05:gain, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.03);
-  src.connect(hp); hp.connect(g); g.connect(chipGain);
-  src.start(t); src.stop(t+0.035);
-}
-function playDrone(t, dur){
-  const osc = actx.createOscillator(); osc.type = 'triangle';
-  osc.frequency.setValueAtTime(noteToFreq('A2'), t);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(0.12, t+0.3);
-  g.gain.setValueAtTime(0.12, t+Math.max(dur-0.5,0.31));
-  g.gain.linearRampToValueAtTime(0, t+dur);
-  osc.connect(g); g.connect(chipGain);
-  osc.start(t); osc.stop(t+dur+0.05);
-}
-function playArp(note, t){
-  const osc = actx.createOscillator(); osc.type = 'sine';
-  osc.frequency.setValueAtTime(noteToFreq(note), t);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(0.1, t+0.02);
-  g.gain.setValueAtTime(0.1, t+0.15);
-  g.gain.linearRampToValueAtTime(0, t+0.15+1.5);
-  osc.connect(g); g.connect(chipGain);
-  osc.start(t); osc.stop(t+0.15+1.5+0.05);
-}
+
+/* ---- Karplus-Strong jaw-harp twang -- the one synthesized voice that
+   stays, by request; it's a signature sound, not a placeholder ---- */
 function playTwang(t, gainMul){
   gainMul = gainMul===undefined ? 1 : gainMul;
   const dur = 1.1;
@@ -632,196 +669,37 @@ function playTwang(t, gainMul){
 function playBeep(t){
   // typewriter beep removed by request -- the per-character chirp read as "loud beeping"
 }
-function playDing(t){
-  const osc = actx.createOscillator(); osc.type='sine'; osc.frequency.value = 1320;
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.08, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.08);
-  osc.connect(g); g.connect(fxGain);
-  osc.start(t); osc.stop(t+0.09);
-}
-function playSlamBoom(t){
-  const osc = actx.createOscillator(); osc.type='sine';
-  osc.frequency.setValueAtTime(55, t);
-  osc.frequency.exponentialRampToValueAtTime(30, t+0.25);
-  const og = actx.createGain();
-  og.gain.setValueAtTime(0.6, t);
-  og.gain.exponentialRampToValueAtTime(0.001, t+0.25);
-  osc.connect(og); og.connect(fxGain);
-  osc.start(t); osc.stop(t+0.26);
-  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
-  const ng = actx.createGain();
-  ng.gain.setValueAtTime(0.5, t);
-  ng.gain.exponentialRampToValueAtTime(0.001, t+0.2);
-  src.connect(ng); ng.connect(fxGain);
-  src.start(t); src.stop(t+0.21);
-}
+function playDing(t){ playSample('ding', t); }
+function playSlamBoom(t){ playSample('slamBoom', t); }
 function playFanfare(t){
-  const notes = [['C5',0,0.25],['E5',0.25,0.25],['G5',0.5,0.25],['B5',0.75,0.25],['C6',1,1.5]];
-  for(const [note,off,dur] of notes){
-    playLead(note, t+off, dur, note==='C6', 0.2);
-  }
-  playTwang(t+1, 0.9);
+  playSample('fanfare', t);
+  playTwang(t+1.2, 0.9); // tail twang, ~ where the old melodic run landed its last note
 }
-/* fake-death "victory" jingle -- just the first 4 notes of the fanfare, cut off
-   by the record scratch before the long C6 lands */
-function playJingleStart(t){
-  const notes = [['C5',0,0.22],['E5',0.25,0.22],['G5',0.5,0.22],['B5',0.75,0.35]];
-  for(const [note,off,dur] of notes) playLead(note, t+off, dur, false, 0.2);
-}
-/* DJ-style record scratch: fast noise pitch sweep via a resonant bandpass
-   swept down then a hair back up, gated by a short noisy envelope */
-function playRecordScratch(t){
-  const src = actx.createBufferSource(); src.buffer = noiseBuffer; src.loop = true;
-  const bp = actx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 8;
-  bp.frequency.setValueAtTime(2200, t);
-  bp.frequency.linearRampToValueAtTime(180, t+0.16);
-  bp.frequency.linearRampToValueAtTime(900, t+0.22);
-  bp.frequency.linearRampToValueAtTime(120, t+0.32);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.28, t);
-  g.gain.setValueAtTime(0.28, t+0.3);
-  g.gain.linearRampToValueAtTime(0, t+0.36);
-  src.connect(bp); bp.connect(g); g.connect(fxGain);
-  src.start(t); src.stop(t+0.4);
-}
-function playGlassShatter(t){
-  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
-  const hp = actx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=2500;
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.4, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.35);
-  src.connect(hp); hp.connect(g); g.connect(fxGain);
-  src.start(t); src.stop(t+0.36);
-  for(let i=0;i<4;i++){
-    const o = actx.createOscillator(); o.type='sine';
-    o.frequency.setValueAtTime(1800+Math.random()*1400, t+i*0.02);
-    const og = actx.createGain();
-    og.gain.setValueAtTime(0.06, t+i*0.02);
-    og.gain.exponentialRampToValueAtTime(0.001, t+i*0.02+0.12);
-    o.connect(og); og.connect(fxGain);
-    o.start(t+i*0.02); o.stop(t+i*0.02+0.13);
-  }
-}
-function playThud(t){
-  const osc = actx.createOscillator(); osc.type='sine';
-  osc.frequency.setValueAtTime(160, t);
-  osc.frequency.exponentialRampToValueAtTime(70, t+0.12);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.3, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.13);
-  osc.connect(g); g.connect(fxGain);
-  osc.start(t); osc.stop(t+0.14);
-}
-/* deadpan "wah wah wah" -- 3 descending low square notes, for jumping the punchline early */
-function playGroan(t){
-  const notes = ['G3','E3','C3'];
-  notes.forEach((n,i)=>{
-    const off = i*0.14;
-    const osc = actx.createOscillator(); osc.type='square';
-    osc.frequency.setValueAtTime(noteToFreq(n), t+off);
-    const g = actx.createGain();
-    g.gain.setValueAtTime(0.12, t+off);
-    g.gain.exponentialRampToValueAtTime(0.001, t+off+0.13);
-    osc.connect(g); g.connect(fxGain);
-    osc.start(t+off); osc.stop(t+off+0.14);
-  });
-}
-/* short downward bandpassed noise sweep -- the boss dodging a throw */
-function playWhoosh(t){
-  const src = actx.createBufferSource(); src.buffer = noiseBuffer;
-  const bp = actx.createBiquadFilter(); bp.type='bandpass'; bp.Q.value=4;
-  bp.frequency.setValueAtTime(2200, t);
-  bp.frequency.exponentialRampToValueAtTime(300, t+0.35);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.22, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.4);
-  src.connect(bp); bp.connect(g); g.connect(fxGain);
-  src.start(t); src.stop(t+0.42);
-}
-function playPickupChime(t){
-  [['E5',0],['A5',0.06]].forEach(([n,off])=>{
-    const osc = actx.createOscillator(); osc.type='sine';
-    osc.frequency.setValueAtTime(noteToFreq(n), t+off);
-    const g = actx.createGain();
-    g.gain.setValueAtTime(0.1, t+off);
-    g.gain.exponentialRampToValueAtTime(0.001, t+off+0.14);
-    osc.connect(g); g.connect(fxGain);
-    osc.start(t+off); osc.stop(t+off+0.15);
-  });
-}
-/* short two-note "ha-ha" staccato blip, layered on top of the pickup chime */
-function playHaBlip(t){
-  [0,0.09].forEach((off)=>{
-    const osc = actx.createOscillator(); osc.type='square';
-    osc.frequency.setValueAtTime(noteToFreq('C6'), t+off);
-    const g = actx.createGain();
-    g.gain.setValueAtTime(0.06, t+off);
-    g.gain.exponentialRampToValueAtTime(0.001, t+off+0.07);
-    osc.connect(g); g.connect(fxGain);
-    osc.start(t+off); osc.stop(t+off+0.08);
-  });
-}
-/* quiet, low, two-note DOWN-blip -- one laugh-meter half-heart lost to the
-   drain clock. Deliberately soft (gain 0.045) and low-register so it reads
-   as "a little air going out of the room," not an alarm. */
-function playDrainBlip(t){
-  [['G4',0],['D4',0.09]].forEach(([n,off])=>{
-    const osc = actx.createOscillator(); osc.type='sine';
-    osc.frequency.setValueAtTime(noteToFreq(n), t+off);
-    const g = actx.createGain();
-    g.gain.setValueAtTime(0.045, t+off);
-    g.gain.exponentialRampToValueAtTime(0.001, t+off+0.16);
-    osc.connect(g); g.connect(fxGain);
-    osc.start(t+off); osc.stop(t+off+0.17);
-  });
-}
-/* sad descending synth gliss -- Epilogue A's "deleted all my photos" beat */
-function playSadGliss(t){
-  const osc = actx.createOscillator(); osc.type='triangle';
-  osc.frequency.setValueAtTime(440, t);
-  osc.frequency.exponentialRampToValueAtTime(110, t+0.6);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.001, t);
-  g.gain.linearRampToValueAtTime(0.14, t+0.05);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.65);
-  osc.connect(g); g.connect(fxGain);
-  osc.start(t); osc.stop(t+0.66);
-}
-/* soft high tick -- typing at the desk in Epilogue B */
-function playKeyBlip(t){
-  const osc = actx.createOscillator(); osc.type='square';
-  osc.frequency.setValueAtTime(1800+Math.random()*400, t);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.025, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.025);
-  osc.connect(g); g.connect(fxGain);
-  osc.start(t); osc.stop(t+0.03);
-}
-/* single soft chime -- each of the 4 phone-share pings in Epilogue B */
-function playSoftChime(t){
-  const osc = actx.createOscillator(); osc.type='sine';
-  osc.frequency.setValueAtTime(noteToFreq('A5'), t);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0.07, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t+0.2);
-  osc.connect(g); g.connect(fxGain);
-  osc.start(t); osc.stop(t+0.22);
-}
-/* low filtered-noise swell -- the critic's transformation moment */
-function playRumble(t){
-  const src = actx.createBufferSource(); src.buffer = noiseBuffer; src.loop = true;
-  const lp = actx.createBiquadFilter(); lp.type = 'lowpass';
-  lp.frequency.setValueAtTime(70, t);
-  lp.frequency.linearRampToValueAtTime(240, t+0.3);
-  lp.frequency.linearRampToValueAtTime(60, t+0.65);
-  const g = actx.createGain();
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(0.32, t+0.3);
-  g.gain.linearRampToValueAtTime(0, t+0.65);
-  src.connect(lp); lp.connect(g); g.connect(fxGain);
-  src.start(t); src.stop(t+0.7);
-}
+/* fake-death "victory" jingle -- cut off by the record scratch before it resolves */
+function playJingleStart(t){ playSample('jingleStart', t); }
+/* DJ-style record scratch -- the fake-death gag */
+function playRecordScratch(t){ playSample('recordScratch', t); }
+function playGlassShatter(t){ playSample('glassShatter', t); }
+function playThud(t){ playSample('thud', t); }
+/* early-punchline penalty ("jumped the punchline") */
+function playGroan(t){ playSample('groan', t); }
+/* the boss dodging a throw */
+function playWhoosh(t){ playSample('whoosh', t); }
+function playPickupChime(t){ playSample('pickupChime', t); }
+/* layered on top of the pickup chime for "laugh captured" / review given */
+function playHaBlip(t){ playSample('haBlip', t); }
+/* quiet, low -- one laugh-meter half-heart lost to the drain clock.
+   Deliberately soft (see SFX_DEFS gain) so it reads as "a little air going
+   out of the room," not an alarm. */
+function playDrainBlip(t){ playSample('drainBlip', t); }
+/* Epilogue A's "deleted all my photos" reaction beat */
+function playSadGliss(t){ playSample('sadGliss', t); }
+/* typing at the desk in Epilogue B */
+function playKeyBlip(t){ playSample('keyBlip', t); }
+/* each of the 4 phone-share pings in Epilogue B */
+function playSoftChime(t){ playSample('softChime', t); }
+/* the critic's transformation moment */
+function playRumble(t){ playSample('rumble', t); }
 function duckDown(t, target){
   const g = musicGain.gain;
   g.cancelScheduledValues(t);
@@ -840,158 +718,6 @@ function setMusicLevel(level, t, rampTime){
   g.cancelScheduledValues(t);
   g.setValueAtTime(g.value, t);
   g.linearRampToValueAtTime(level, t+(rampTime===undefined?1.0:rampTime));
-}
-
-/* ---------------- composed music data (same original tables as the intro) ---------------- */
-const THEME_A = {
-  lead: [
-    ['A4',0,1.5],['B4',1.5,0.5],['C5',2,2],['E5',4,3],['D5',7,1],
-    ['C5',8,1],['D5',9,1],['E5',10,1],['G5',11,1],['A5',12,3],
-    ['G5',16,2],['E5',18,2],['F5',20,1],['E5',21,1],['D5',22,2],
-    ['E5',24,1],['D5',25,1],['C5',26,1],['B4',27,1],['A4',28,3.5]
-  ],
-  bassRoots: ['A2','A2','C3','A2','E2','D2','E2','A2'],
-  twangBeats: [12, 28]
-};
-const THEME_B = {
-  lead: [
-    ['C5',0,1.5],['D5',1.5,0.5],['E5',2,2],['G5',4,3],['E5',7,1],
-    ['F5',8,1],['G5',9,1],['A5',10,2],['G5',12,4],
-    ['E5',16,1.5],['F5',17.5,0.5],['G5',18,2],['C6',20,3],['B5',23,1],
-    ['A5',24,1],['G5',25,1],['E5',26,1],['D5',27,1],['C5',28,3.5]
-  ],
-  bassRoots: ['C3','C3','F2','G2','C3','A2','F2+G2','A2'],
-  twangBeats: [28]
-};
-
-/* ---------------- generalized lookahead scheduler / music director ----------------
-   Unlike the intro (one fixed BPM, infinite A-A-B-A loop), the game needs tempo,
-   drums/harmony/hat-density and the section program itself to change live as the
-   player moves between beats. `musicDir` holds the mutable settings; dispatch-time
-   flags (drumsOn / harmonyOn / hatsSixteenths) let already-generated events react
-   to a beat change without needing to be regenerated. */
-const SCHED_INTERVAL_MS = 25;
-const SCHED_LOOKAHEAD = 0.12;
-let eventQueue = [];
-let audioT0 = null;
-let schedulerTimer = null;
-const musicDir = {
-  bpm: 112,
-  beat: BEAT_DEFAULT,
-  program: null,      // (startTime) => 'A' | 'B' | null(stop)
-  generatedUpTo: 0,
-  droneOn: false
-};
-
-function pushSorted(batch){
-  batch.sort((a,b)=>a.time-b.time);
-  eventQueue.push(...batch);
-}
-function generateSectionEvents(name, startTime, beatDur, opts){
-  opts = opts || {};
-  const data = name==='A' ? THEME_A : THEME_B;
-  const batch = [];
-  for(const [note,sb,dur] of data.lead){
-    batch.push({time:startTime+sb*beatDur, type:'lead', note, dur:dur*beatDur, vibrato:dur>=2});
-    if(opts.harmony){
-      batch.push({time:startTime+sb*beatDur, type:'harmony', note:diatonicThirdBelow(note), dur:dur*beatDur});
-    }
-  }
-  for(let bar=0; bar<8; bar++){
-    const barStart = startTime + bar*4*beatDur;
-    const rootSpec = data.bassRoots[bar];
-    if(rootSpec.indexOf('+') >= 0){
-      const parts = rootSpec.split('+');
-      [0,0.5,1,1.5].forEach(p=> batch.push({time:barStart+p*beatDur, type:'bass', note:parts[0], dur:0.5*beatDur}));
-      [2,2.5,3,3.5].forEach(p=> batch.push({time:barStart+p*beatDur, type:'bass', note:parts[1], dur:0.5*beatDur}));
-    } else {
-      const fifthPos = new Set([1.5,3.5]);
-      [0,0.5,1,1.5,2,2.5,3,3.5].forEach(p=>{
-        batch.push({time:barStart+p*beatDur, type:'bass', note:rootSpec, dur:0.5*beatDur, fifth:fifthPos.has(p)});
-      });
-    }
-    batch.push({time:barStart+0*beatDur, type:'kick'});
-    batch.push({time:barStart+2*beatDur, type:'kick'});
-    batch.push({time:barStart+1*beatDur, type:'snare'});
-    batch.push({time:barStart+3*beatDur, type:'snare'});
-    const hatN = opts.hatsSixteenths ? 16 : 8;
-    for(let e=0;e<hatN;e++) batch.push({time:barStart+e*(4*beatDur/hatN), type:'hat', gain:opts.hatsSixteenths?0.035:0.05});
-  }
-  for(const tb of data.twangBeats){
-    batch.push({time:startTime+tb*beatDur, type:'twang'});
-  }
-  if(opts.drone){
-    batch.push({time:startTime, type:'drone', dur:32*beatDur+0.3});
-  }
-  pushSorted(batch);
-  return startTime + 32*beatDur;
-}
-/* the composed chiptune note types -- silenced (not un-scheduled, just not
-   sounded) whenever the real mp3 track is confirmed playing */
-const MUSIC_NOTE_TYPES_GAME = new Set(['lead','harmony','bass','kick','snare','hat','drone','arp','twang']);
-function dispatchEvent(ev, atTime){
-  if(MUSIC_NOTE_TYPES_GAME.has(ev.type)){
-    if(useMp3Music) return;
-    // grace window: while the track is still downloading/decoding and could
-    // start any moment, keep the chiptune silent so its first note doesn't
-    // leak out ahead of the real music. If the track is slow or failed, the
-    // (quiet) chiptune starts covering once the window lapses.
-    if(bgmFetchState !== 'failed' && performance.now() < bgmGraceUntil) return;
-  }
-  switch(ev.type){
-    case 'lead': playLead(ev.note, atTime, ev.dur, ev.vibrato); break;
-    case 'harmony': if(harmonyOn) playHarmony(ev.note, atTime, ev.dur); break;
-    case 'bass': playBass(ev.note, atTime, ev.dur, ev.fifth); break;
-    case 'kick': if(drumsOn) playKick(atTime); break;
-    case 'snare': if(drumsOn) playSnare(atTime); break;
-    case 'hat': if(drumsOn) playHat(atTime, ev.gain); break;
-    case 'twang': playTwang(atTime); break;
-    case 'drone': playDrone(atTime, ev.dur); break;
-    case 'arp': playArp(ev.note, atTime); break;
-  }
-}
-function schedulerTick(){
-  if(!actx) return;
-  const songTime = actx.currentTime - audioT0;
-  while(musicDir.program && musicDir.generatedUpTo < songTime + 1.0){
-    const name = musicDir.program(musicDir.generatedUpTo);
-    if(!name) break;
-    musicDir.generatedUpTo = generateSectionEvents(name, musicDir.generatedUpTo, musicDir.beat, {
-      harmony: harmonyOn, hatsSixteenths, drone: musicDir.droneOn
-    });
-  }
-  while(eventQueue.length && eventQueue[0].time <= songTime + SCHED_LOOKAHEAD){
-    const ev = eventQueue.shift();
-    dispatchEvent(ev, audioT0 + ev.time);
-  }
-}
-/* clear the future queue and switch to a new looping/one-shot program at a given BPM */
-function setMusicProgram(programFn, bpm){
-  const now = actx ? (actx.currentTime - audioT0) : 0;
-  eventQueue = [];
-  if(bpm) { musicDir.bpm = bpm; musicDir.beat = 60/bpm; }
-  musicDir.generatedUpTo = now;
-  musicDir.program = programFn;
-}
-function loopProgram(name){ return ()=> name; }
-function onceProgram(names){
-  const q = names.slice();
-  return ()=> q.length ? q.shift() : null;
-}
-function startScheduler(){
-  eventQueue = [];
-  musicDir.generatedUpTo = 0;
-  musicDir.program = null;
-  if(schedulerTimer) clearInterval(schedulerTimer);
-  schedulerTick();
-  schedulerTimer = setInterval(schedulerTick, SCHED_INTERVAL_MS);
-}
-/* short one-shot drone+arpeggio interlude (real death / soft moments), scheduled
-   directly rather than through the section program since it doesn't loop */
-function playSoftInterlude(t){
-  playDrone(t, 6.5);
-  const notes = ['A3','C4','E4','A4','A3','C4'];
-  notes.forEach((n,i)=> playArp(n, t+i*2*BEAT_DEFAULT));
 }
 
 /* ======================================================================
@@ -1908,8 +1634,7 @@ function enterPhase(name){
     boss.x = BOSS_DOOR.x+BOSS_DOOR.w/2; boss.y = BOSS_DOOR.y+BOSS_DOOR.h*0.6;
     boss.transforming = false; boss.transformT = 0.6; boss.targetScale = 1.8;
     bottlePickup.active = true;
-    drumsOn = true; harmonyOn=false; hatsSixteenths=false;
-    if(actx){ musicDir.droneOn=true; setMusicProgram(loopProgram('A'), 140); }
+    setBeatMusic('boss');
     maybeShowCard('boss'); // "right after the door pop, before his first attack"
   } else if(name==='beat3_intro'){
     player.canMove = false;
@@ -1945,8 +1670,7 @@ function enterPhase(name){
       playSlamBoom(now);
       playTwang(now);
       playTwang(now+BEAT_DEFAULT);
-      drumsOn = true; harmonyOn = true; hatsSixteenths = false;
-      setMusicProgram(onceProgram(['B']), 118);
+      setBeatMusic('celebration');
       duckUp(now, 1.0);
       if(speechWorked===true) speakForFree();
     }
@@ -1966,8 +1690,7 @@ function enterPhase(name){
     player.canMove = true;
     aram.state = 'chase';
     resetReviewers();
-    drumsOn = true; harmonyOn = true; hatsSixteenths = true;
-    if(actx){ musicDir.droneOn = false; setMusicProgram(loopProgram('B'), 140); }
+    setBeatMusic('chase');
     maybeShowCard('aram');
   } else if(name==='beat4_turngood'){
     aram.state = 'frozen';
@@ -2003,12 +1726,11 @@ function enterPhase(name){
     phaseData.flashesAt = [1.0, 3.2];
     phaseData.flashesFired = [false, false];
     triggerShake(6, 0.4);
-    drumsOn = true; harmonyOn = true; hatsSixteenths = true;
+    setBeatMusic('celebration');
     if(actx){
       const now = actx.currentTime;
-      duckUp(now, 1.0); // mp3 (if active) and/or chiptune both come back at full
+      duckUp(now, 1.0); // mp3 (if active) and/or the loop score both come back at full
       playFanfare(now);
-      setMusicProgram(loopProgram('B'), 130);
     }
     if(speechWorked===true) speakForFree();
   } else if(name==='epilogueA'){
@@ -2028,6 +1750,7 @@ function enterPhase(name){
     phaseData.doorX = BATHROOM_DOOR.x + BATHROOM_DOOR.w/2;
     phaseData.doorY = BATHROOM_DOOR.h + 40;
     phaseData.puffs = [];
+    setBeatMusic('sad'); // "bathroom/sad moments" -- Sad Descent
     if(actx) duckDown(actx.currentTime, 0.3);
   } else if(name==='epilogueB'){
     // THE GUY WHO BUILT THIS: a letterboxed 4-shot meta-joke cutaway (dining
@@ -2040,6 +1763,7 @@ function enterPhase(name){
     phaseData.builder = diners[3];
     phaseData.lastKeyBlipAt = -999;
     phaseData.pingIndex = 0;
+    setBeatMusic('dinner'); // back to a lighthearted register for the meta-joke cutaway
     if(actx) duckDown(actx.currentTime, 0.25);
   } else if(name==='beat5_chase'){
     // TECH SUPPORT: pure comedy chase, no damage/drain/death. Reuses the
@@ -2051,8 +1775,7 @@ function enterPhase(name){
     r.wanderTX = r.x; r.wanderTY = r.y;
     stats.resets = 0;
     phaseData.lastBubbleAt = -999;
-    drumsOn = true; harmonyOn = true; hatsSixteenths = false;
-    if(actx){ musicDir.droneOn = false; setMusicProgram(loopProgram('A'), 120); }
+    setBeatMusic('chase');
     maybeShowCard('beat5');
   } else if(name==='beat5_resolve'){
     player.canMove = false;
@@ -2062,12 +1785,11 @@ function enterPhase(name){
     spawnHaBurst(r.x, r.y-40, gameT);
     if(woman.active) spawnHaBurst(woman.x, woman.y-40, gameT);
     if(boss.state==='revived') spawnHaBurst(boss.x, boss.y-40, gameT);
+    setBeatMusic('celebration');
     if(actx){
       const now = actx.currentTime;
       duckUp(now, 1.0);
       playFanfare(now);
-      drumsOn = true; harmonyOn = true; hatsSixteenths = true;
-      setMusicProgram(onceProgram(['B']), 118);
     }
   } else if(name==='endcard'){
     phaseData.rank = computeRank();
@@ -2083,6 +1805,8 @@ function enterPhase(name){
     }
   } else if(name==='gameover'){
     // whole table reacts
+    setBeatMusic('gameover');
+    if(actx) duckDown(actx.currentTime, 0.5);
   } else if(name==='retrycard'){
     // nothing
   }
@@ -2121,7 +1845,6 @@ function triggerTooSoon(){
 function triggerForFree(){
   const perfect = (gameT - phaseData.promptStart) <= D('perfectWindow');
   triggerShake(8, 0.4);
-  drumsOn = true;
   if(actx){
     const now = actx.currentTime;
     playSlamBoom(now);
@@ -2196,8 +1919,10 @@ function checkBossHit(){
     } else {
       boss.state = 'dead'; boss.deadT = 0;
       spawnBigHeart(boss.x, boss.y+50, gameT);
-      drumsOn=false; harmonyOn=false; hatsSixteenths=false;
-      if(actx){ musicDir.droneOn=false; setMusicProgram(null); duckDown(actx.currentTime, 0.15); playSoftInterlude(actx.currentTime+0.3); }
+      // true-silence beat, then Sad Descent softly emerges underneath the
+      // woman's sincere line (replaces the old drone+arp interlude)
+      setBeatMusic('sad');
+      if(actx) duckDown(actx.currentTime, 0.15);
     }
   }
 }
@@ -2344,7 +2069,8 @@ function updateFakeDeath(dt){
     boss.hp = D('bossPhase2Hp'); boss.maxHp = D('bossPhase2Hp');
     boss.napkinTimer = D('napkinIntervalP2'); boss.critiqueTimer = 6;
     boss.targetScale = 2.1; // presentation only -- hitbox/gameplay unchanged
-    harmonyOn = true; hatsSixteenths = true;
+    // Mission Plausible (already playing) carries phase 2's intensity on its
+    // own -- no live layering to flip anymore now that it's a composed loop
   }
 }
 /* fold phase2active back into the same attack/duck logic as active */
@@ -2942,12 +2668,11 @@ function updatePhase(dt){
         spawnSparkleBurst(aram.x, aram.y-60, 14, gameT);
         phaseData.bubbleTw = makeTypewriter(['FIVE STARS...'], 18, 0.4);
         phaseData.bubbleStart = phaseElapsed;
+        setBeatMusic('celebration');
         if(actx){
           const now = actx.currentTime;
           playFanfare(now);
           duckUp(now, 1.0);
-          drumsOn = true; harmonyOn = true; hatsSixteenths = false;
-          setMusicProgram(onceProgram(['B']), 118);
         }
       } else if(phaseData.stage===1){
         const local = phaseElapsed-phaseData.bubbleStart;
@@ -3174,12 +2899,10 @@ function update(dt){
 function ensureAudioStarted(){
   if(!actx){
     initAudio();
-    audioT0 = actx.currentTime;
-    startScheduler();
-    setMusicProgram(loopProgram('A'), 112);
-    // hold the chiptune silent briefly -- on a normal connection the real
-    // track decodes and starts well inside this window, so the understudy
-    // never makes a sound at all
+    setBeatMusic('dinner');
+    // hold the loop understudy silent briefly -- on a normal connection the
+    // real track decodes and starts well inside this window, so it never
+    // makes a sound at all
     bgmGraceUntil = performance.now() + 3000;
     tryDecodeMusic(); // decode needs the context that now exists
   }
@@ -4297,8 +4020,7 @@ function startAtEnding(){
   });
   stats.reviews = need;
   cardsShown.start = true; cardsShown.capture = true; cardsShown.boss = true; cardsShown.aram = true;
-  drumsOn = true; harmonyOn = true; hatsSixteenths = true;
-  if(actx){ musicDir.droneOn = false; setMusicProgram(loopProgram('B'), 140); }
+  setBeatMusic('chase'); // simulating "was mid-chase when caught," same as beat4_chase's own pick
   enterPhase('beat4_turngood');
 }
 function startAtTechSupport(){
@@ -4357,7 +4079,7 @@ function frame(nowMs){
   else if(modeSelectPending) drawModeSelectOverlay(ctx);
   else if(activeCard) drawCardOverlay(ctx);
   drawVolumeUI(ctx); // always last -- on top of every other overlay, reachable from any screen
-  if(actx) schedulerTick();
+  if(actx) updateBeatMusic();
 }
 requestAnimationFrame(frame);
 </script>
